@@ -1,0 +1,58 @@
+# ---------------------------------------------------------------------------
+# Gillis V2 .gitignore
+# ---------------------------------------------------------------------------
+
+# --- Node / Vite (gui/) ----------------------------------------------------
+node_modules/
+gui/dist/
+gui/dist.new/
+gui/dist.old/
+.vite/
+*.log
+npm-debug.log*
+
+# --- Environment / secrets -------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+gillis_deploy_key
+gillis_deploy_key.pub
+id_ed25519
+id_ed25519.pub
+
+# --- Arduino / Teensy build artefacts (firmware/) --------------------------
+firmware/build/
+firmware/.build/
+firmware/.pio/
+*.hex
+*.elf
+*.bin
+
+# --- Editors / OS ----------------------------------------------------------
+.vscode/
+.idea/
+.theia/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- OneDrive sync sidecars (in case repo ever sits in a synced folder) ---
+*.tmp
+~$*
+
+# --- Runtime / Pi-side logs ------------------------------------------------
+/tmp/
+gillis-backend.log
+gillis-server.log
+
+# --- Cowork / local agent scratch (if any of these ever land here) --------
+local-agent-mode-sessions/
+.claude/
+
+# Local backups + leftover ZIP extraction artefacts
+Claude Programming (old)/
+gillis-v2-main

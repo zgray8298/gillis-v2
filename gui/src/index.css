@@ -1,0 +1,43 @@
+@import "tailwindcss";
+
+html, body, #root {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* Global text-size bump — Tailwind's text-xs / text-sm / text-base / text-lg
+   are all rem-based, so lifting the root font-size scales them uniformly.
+   Default Tailwind base is 16px; 24px is a 50% lift over the Tailwind
+   default. The Pi touchscreen benefits from the bigger hit area on
+   text-only controls. Pixel-locked classes (text-[10px] etc.) used for
+   status pills aren't affected — those should stay compact. */
+html {
+  font-size: 24px;
+}
+
+body {
+  background: #000;
+  font-family: Arial, sans-serif;
+  /* Touchscreen: suppress double-tap zoom, pull-to-refresh, and text selection.
+     All scrollable regions are reached by drag gestures instead of the
+     scrollbar, so the native scrollbar chrome is hidden globally. */
+  -webkit-user-select: none;
+  user-select: none;
+  overscroll-behavior: none;
+  touch-action: manipulation;
+}
+
+/* Hide scrollbars everywhere — drag gestures (see useDragScroll in App.jsx)
+   drive scrolling on the Pi touchscreen. Kept accessible via keyboard / wheel. */
+*::-webkit-scrollbar { width: 0; height: 0; display: none; }
+* { scrollbar-width: none; -ms-overflow-style: none; }
+
+/* Allow native text selection only inside explicitly opt-in fields (numeric
+   keypads render values into these). */
+.allow-select,
+input,
+textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}

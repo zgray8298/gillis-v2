@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Gillis Welder
+GenericName=Gillis V2 Control Interface
+Comment=Open the Gillis V2 welder GUI in full screen
+Exec=/home/ionetic/Desktop/gillis-v2-ui-v2/start-gillis-gui.sh
+Icon=applications-engineering
+Terminal=false
+StartupNotify=true
+Categories=Utility;Application;

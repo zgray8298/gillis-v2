@@ -1,0 +1,53 @@
+# Auto-normalise text files: store with LF in the repo, check out with the
+# platform's native ending. This makes line-ending behaviour explicit and
+# independent of each contributor's git config.
+
+* text=auto eol=lf
+
+# --- Shell scripts: ALWAYS LF (run on the Pi / Linux). Critical: a CRLF
+# start-gillis-gui.sh will fail to launch the kiosk on the Pi.
+*.sh        text eol=lf
+
+# --- Windows-side scripts: CRLF is conventional and works fine in PowerShell.
+*.ps1       text eol=crlf
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+
+# --- Firmware: keep LF (Arduino IDE is fine with either; LF matches Linux/Pi tooling)
+*.ino       text eol=lf
+*.h         text eol=lf
+*.cpp       text eol=lf
+*.c         text eol=lf
+
+# --- Web sources: LF
+*.js        text eol=lf
+*.jsx       text eol=lf
+*.ts        text eol=lf
+*.tsx       text eol=lf
+*.json      text eol=lf
+*.css       text eol=lf
+*.html      text eol=lf
+*.md        text eol=lf
+
+# --- Config-like text files
+*.yml       text eol=lf
+*.yaml      text eol=lf
+.gitignore  text eol=lf
+.gitattributes text eol=lf
+
+# --- Binary files: never let git touch these
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.webp      binary
+*.docx      binary
+*.pdf       binary
+*.zip       binary
+*.hex       binary
+*.elf       binary
+*.bin       binary
+
+# --- SVG: text (XML), useful to diff
+*.svg       text eol=lf
