@@ -1,0 +1,14 @@
+{
+  "name": "gillis-v2-scripts",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "One-off automation scripts for the Gillis V2 project (manual screenshot capture, etc.). Kept isolated from gui/ so the GUI build doesn't drag in Playwright.",
+  "scripts": {
+    "capture:manual": "node capture-manual-screenshots.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.0",
+    "ws": "^8.18.0"
+  }
+}

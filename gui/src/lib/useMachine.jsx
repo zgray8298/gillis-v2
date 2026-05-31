@@ -2,7 +2,7 @@
 // Components subscribe to only the slice of state they care about
 // to avoid needless re-renders.
 
-import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { createMachineClient } from './machine.js';
 
 const MachineContext = createContext(null);
@@ -94,23 +94,33 @@ const INITIAL_STATE = {
 
 export function MachineProvider({ children }) {
   const [state, setState] = useState(INITIAL_STATE);
-  const clientRef = useRef(null);
 
-  if (!clientRef.current && typeof window !== 'undefined') {
-    clientRef.current = createMachineClient();
-  }
+  // The MachineClient (a WebSocket wrapper around the backend) lives in
+  // useState — not a useRef — so the api useMemo below recomputes when a
+  // fresh client is mounted. This matters because React.StrictMode
+  // double-mounts effects in dev: previously the client was created during
+  // render and shared via useRef, the first mount's cleanup closed it (the
+  // client has a sticky `closed = true` flag), and the second mount reused
+  // the closed instance — leaving the GUI stuck on "OFFLINE" forever in
+  // dev. Creating the client *inside* useEffect means each mount gets a
+  // fresh client, so StrictMode's double-mount is benign. Production is
+  // unaffected either way (StrictMode is a no-op when bundled).
+  const [client, setClient] = useState(null);
 
   useEffect(() => {
-    const client = clientRef.current;
-    if (!client) return undefined;
+    if (typeof window === 'undefined') return undefined;
 
-    const off = client.subscribe((evt) => {
+    const c = createMachineClient();
+    setClient(c);
+
+    const off = c.subscribe((evt) => {
       setState((prev) => reduce(prev, evt));
     });
 
     return () => {
       off();
-      client.close();
+      c.close();
+      setClient(null);
     };
   }, []);
 
@@ -119,14 +129,15 @@ export function MachineProvider({ children }) {
   const dispatch = (evt) => setState((prev) => reduce(prev, evt));
 
   const api = useMemo(() => {
-    const c = clientRef.current;
-    // Fallback no-op shim if WebSocket isn't available (SSR / tests)
+    const c = client;
+    // Fallback no-op shim if WebSocket isn't available (SSR / tests) or the
+    // useEffect hasn't run yet (initial render before mount).
     if (!c) {
       const noop = async () => ({ ok: false, reply: 'ERROR no client' });
       return {
         state,
         home: noop, stop: noop, moveTo: noop, moveToCal: noop, setZ: noop, fire: noop,
-        setMotionSettings: noop, setGantryOffset: noop, setTram: noop, tramPreview: noop,
+        setMotionSettings: noop, setGantryOffset: noop, setTram: noop, tramPreview: noop, shutdown: noop,
         setTravelLimits: noop, setAirThreshold: noop, setLoadingPosition: noop,
         runProgram: noop, pauseRun: noop, resumeRun: noop, abortRun: noop,
         clearFault: noop,
@@ -157,6 +168,7 @@ export function MachineProvider({ children }) {
       setGantryOffset: c.setGantryOffset,
       setTram: c.setTram,
       tramPreview: c.tramPreview,
+      shutdown: c.shutdown,
       setTravelLimits: c.setTravelLimits,
       setAirThreshold: c.setAirThreshold,
       setLoadingPosition: c.setLoadingPosition,
@@ -205,7 +217,7 @@ export function MachineProvider({ children }) {
         return c.moveTo(x, y);
       },
     };
-  }, [state]);
+  }, [state, client]);
 
   return <MachineContext.Provider value={api}>{children}</MachineContext.Provider>;
 }

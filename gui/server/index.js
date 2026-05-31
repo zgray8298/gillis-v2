@@ -13,6 +13,7 @@ import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { createMockSerial } from './mockSerial.js';
@@ -89,6 +90,31 @@ async function routeCommand(cmd) {
 
   if (orchestrator && orchestrator.isRunCommand(verb)) {
     return orchestrator.handle(verb, rest);
+  }
+
+  // SHUTDOWN — graceful Pi halt so the operator can flip mains without
+  // risking SD-card corruption. Schedule the actual `sudo /sbin/poweroff`
+  // for ~1.5 s in the future so this reply lands on the GUI first and the
+  // pendant has time to switch to its "Safe to power off" overlay before
+  // the OS goes down. Requires a one-time sudoers entry on the Pi:
+  //   ionetic ALL=(root) NOPASSWD: /sbin/poweroff
+  // See docs/SHUTDOWN_SETUP.md for the deploy step.
+  if (verb === 'SHUTDOWN') {
+    // eslint-disable-next-line no-console
+    console.log('[gillis backend] SHUTDOWN requested — scheduling system poweroff in ~1.5s');
+    setTimeout(() => {
+      const child = spawn('sudo', ['/sbin/poweroff'], {
+        detached: true,
+        stdio: 'ignore',
+      });
+      child.on('error', (err) => {
+        // eslint-disable-next-line no-console
+        console.error('[gillis backend] poweroff exec failed:', err.message,
+          '\n  Check that the ionetic user has NOPASSWD sudo for /sbin/poweroff.');
+      });
+      child.unref();
+    }, 1500);
+    return { ok: true, reply: 'OK' };
   }
 
   return null;

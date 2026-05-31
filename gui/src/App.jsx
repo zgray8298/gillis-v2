@@ -859,7 +859,12 @@ function TopStatusBar({
   );
 }
 
-function BottomNav({ onHome, onBack }) {
+function BottomNav({ onHome, onBack, rightSlot = null }) {
+  // The right-hand grid column is normally empty (kept for visual symmetry
+  // with the back arrow on the left). Individual screens can fill it with a
+  // small action via the `rightSlot` prop — used today by the Settings
+  // screen to host its Shut Down button. Anything wider than ~10rem will
+  // crowd the centre Home icon, so keep slot contents compact.
   return (
     <div className="h-10 shrink-0 border-t border-white/10 bg-slate-900/95 px-2 grid grid-cols-3 items-center text-white">
       <div className="justify-self-start">
@@ -878,7 +883,7 @@ function BottomNav({ onHome, onBack }) {
           ⌂
         </button>
       </div>
-      <div />
+      <div className="justify-self-end">{rightSlot}</div>
     </div>
   );
 }
@@ -892,6 +897,7 @@ function ScreenShell({
   onHome,
   onBack,
   activeRun = null,
+  bottomNavRightSlot = null,
 }) {
   const bg =
     mode === "production" || mode === "run"
@@ -904,7 +910,7 @@ function ScreenShell({
     <div className={`h-full flex flex-col bg-gradient-to-br ${bg} text-white`}>
       <TopStatusBar mode={mode} running={running} progress={progress} pulse={pulse} activeRun={activeRun} />
       <div className="flex-1 min-h-0 px-2 py-1.5 overflow-hidden relative">{children}</div>
-      <BottomNav onHome={onHome} onBack={onBack} />
+      <BottomNav onHome={onHome} onBack={onBack} rightSlot={bottomNavRightSlot} />
     </div>
   );
 }
@@ -1672,6 +1678,13 @@ function MachineTravelGraphic({
 function HomeScreen({ setScreen, onHome, onBack }) {
   const machine = useMachine();
 
+  // Operator-manual help modal — opened from the ? button next to the
+  // settings cog. The PDF is served from /manual.pdf (lives in gui/public/
+  // and ships with the Vite build to the Pi). Re-export the PDF from
+  // docs/Gillis_V2_Operator_Manual.docx whenever the manual changes and
+  // copy it to gui/public/manual.pdf so the pendant shows the latest.
+  const [showHelp, setShowHelp] = useState(false);
+
   // Easter egg — five taps on the Ionetic logo within 1.5s of each other
   // opens the hidden System Info screen (Pi temp, CPU/RAM usage, GUI version).
   // Counter resets if the operator pauses too long between taps.
@@ -1820,13 +1833,30 @@ function HomeScreen({ setScreen, onHome, onBack }) {
 
       <div className="relative h-full flex gap-3 z-10">
         <div className="flex-1 flex items-center justify-center relative min-w-0">
-          <button
-            onClick={() => setScreen("settings")}
-            className="absolute left-1 top-1 rounded-2xl bg-white/5 border border-white/10 p-2 hover:bg-white/10 text-base"
-            title="Settings"
-          >
-            ⚙
-          </button>
+          {/* Top-left controls — settings cog + manual (?). Wrapped in a flex
+              row so the two stay adjacent regardless of viewport.
+              z-20 is critical: the scan-ring aspect-square container behind
+              the IONETIC logo extends into the top-left corner with the same
+              stacking context, and despite being visually transparent there
+              it intercepts pointer events on the buttons. Without z-20 the
+              ? button looks tappable but clicks land on the scan-ring div. */}
+          <div className="absolute left-1 top-1 flex gap-2 z-20">
+            <button
+              onClick={() => setScreen("settings")}
+              className="rounded-2xl bg-white/5 border border-white/10 p-2 hover:bg-white/10 text-base w-10 h-10 flex items-center justify-center"
+              title="Settings"
+            >
+              ⚙
+            </button>
+            <button
+              onClick={() => setShowHelp(true)}
+              className="rounded-2xl bg-white/5 border border-white/10 p-2 hover:bg-white/10 text-base font-bold w-10 h-10 flex items-center justify-center"
+              title="Operator Manual"
+              aria-label="Open operator manual"
+            >
+              ?
+            </button>
+          </div>
 
           <div className="relative w-[78%] aspect-square flex items-center justify-center">
             {/* Outer rotating scan rings — decorative when idle, live progress during a run */}
@@ -1999,6 +2029,32 @@ function HomeScreen({ setScreen, onHome, onBack }) {
           </div>
         </div>
       </div>
+
+      {/* Operator-manual overlay — full-screen iframe rendering the PDF
+          from gui/public/manual.pdf via Chromium's built-in PDF viewer
+          (pinch-zoom and page navigation work natively on the touchscreen).
+          Operator dismisses with the Close button; iframe is unmounted when
+          closed so memory isn't held while welding. */}
+      {showHelp && (
+        <div className="fixed inset-0 z-[9700] flex flex-col bg-black/95">
+          <div className="flex items-center justify-between p-2 border-b border-white/10 shrink-0">
+            <div className="text-sm tracking-[0.25em] uppercase text-slate-300 pl-2">
+              Operator Manual
+            </div>
+            <button
+              onClick={() => setShowHelp(false)}
+              className="rounded-xl bg-white/10 border border-white/10 px-4 py-2 text-sm font-semibold hover:bg-white/15"
+            >
+              Close ✕
+            </button>
+          </div>
+          <iframe
+            src="/manual.pdf"
+            title="Operator Manual"
+            className="flex-1 bg-white"
+          />
+        </div>
+      )}
     </ScreenShell>
   );
 }
@@ -5187,6 +5243,38 @@ function SettingsScreen({
   };
   const [saveLabel, setSaveLabel] = useState("Save to Teensy EEPROM");
   const [saving, setSaving] = useState(false);
+
+  // Shut Down — two-step process: confirm modal, then a "safe to power off"
+  // overlay while the Pi is halting. Backend exec's `sudo /sbin/poweroff`
+  // after a short delay (see server/index.js SHUTDOWN intercept). Refuses
+  // mid-run or while the machine is moving so a button-tap can't strand a
+  // weld half-finished.
+  const [shutdownConfirmOpen, setShutdownConfirmOpen] = useState(false);
+  const [shuttingDown, setShuttingDown] = useState(false);
+  const shutdownBlocked =
+    !!machine.state.run?.active ||
+    !!machine.state.run?.paused ||
+    !!machine.state.busy ||
+    !!machine.state.homing;
+  const shutdownBlockedReason = machine.state.run?.active
+    ? "A program is running — abort it first."
+    : machine.state.run?.paused
+    ? "A program is paused — abort or resume + complete it first."
+    : machine.state.homing
+    ? "Homing in progress — wait for it to finish."
+    : machine.state.busy
+    ? "Machine is moving — wait for the motion to complete."
+    : null;
+  const confirmShutdown = async () => {
+    setShutdownConfirmOpen(false);
+    setShuttingDown(true);
+    try {
+      await machine.shutdown();
+    } catch {
+      // Best-effort — if the WS dropped the moment poweroff fired we still
+      // want the overlay up so the operator sees the safe-to-power-off message.
+    }
+  };
   // Air pressure threshold is owned by the machine state (so it stays in sync
   // with the firmware snapshot). We mirror it into a local edit buffer so
   // operator keypad edits don't immediately clobber the live reading, and
@@ -5314,8 +5402,38 @@ function SettingsScreen({
     });
   };
 
+  // Compact Shut Down button that lives in the bottom nav's right-hand slot
+  // (see BottomNav.rightSlot). Keeping it down here — out of the main grid
+  // of settings cards — both signals "this is a separate, deliberate action"
+  // and stops it from squeezing the Save / Commissioning row's layout.
+  const shutdownNavButton = (
+    <button
+      onClick={() => setShutdownConfirmOpen(true)}
+      disabled={shutdownBlocked}
+      title={
+        shutdownBlocked
+          ? shutdownBlockedReason || "Cannot shut down right now."
+          : "Shut down the pendant safely before flipping the mains switch."
+      }
+      className="rounded-lg border h-8 px-3 text-[10px] font-semibold tracking-[0.15em] uppercase inline-flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+      style={{
+        background: shutdownBlocked
+          ? "rgba(127, 29, 29, 0.25)"
+          : "linear-gradient(135deg, rgba(220, 38, 38, 0.85), rgba(127, 29, 29, 0.6))",
+        borderColor: "rgba(220, 38, 38, 0.5)",
+        color: "#fee2e2",
+      }}
+    >
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M18.36 6.64a9 9 0 1 1-12.73 0" />
+        <line x1="12" y1="2" x2="12" y2="12" />
+      </svg>
+      Shut Down
+    </button>
+  );
+
   return (
-    <ScreenShell mode="settings" onHome={onHome} onBack={onBack}>
+    <ScreenShell mode="settings" onHome={onHome} onBack={onBack} bottomNavRightSlot={shutdownNavButton}>
       <div className="h-full min-h-0 flex flex-col gap-2">
         {keypadState.open ? (
           <HudCard
@@ -5687,6 +5805,77 @@ function SettingsScreen({
           </>
         )}
       </div>
+
+      {/* Confirmation modal — first stop on the shutdown path. Operator must
+          tap the red Shut Down button here to actually halt the Pi. */}
+      {shutdownConfirmOpen && (
+        <div className="fixed inset-0 z-[9700] flex items-center justify-center bg-black/75 backdrop-blur-sm">
+          <HudCard
+            accent="#dc2626"
+            accentRgb="220,38,38"
+            className="p-6 w-[min(560px,92vw)]"
+          >
+            <div className="text-[10px] tracking-[0.32em] uppercase text-slate-300 mb-1">
+              Confirm Shutdown
+            </div>
+            <div className="text-xl font-bold mb-3" style={{ color: "#fca5a5" }}>
+              Shut down the pendant?
+            </div>
+            <div className="text-sm text-slate-200 mb-4 leading-relaxed">
+              The pendant will halt the Raspberry Pi safely so you can flip
+              the main power switch without risking SD-card corruption. The
+              screen will go dark within ~20 seconds — that's your cue to
+              flip the mains.
+            </div>
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-100 leading-snug mb-5">
+              Two-step shutdown: tap Shut Down here, wait until the screen goes dark, THEN flip the mains. Don&apos;t cut power while the screen is still on.
+            </div>
+            <div className="flex items-center justify-end gap-3">
+              <button
+                onClick={() => setShutdownConfirmOpen(false)}
+                className="h-11 px-5 text-xs font-semibold tracking-[0.15em] uppercase rounded-lg border border-white/10 bg-white/5 hover:bg-white/10"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmShutdown}
+                className="h-11 px-5 text-xs font-bold tracking-[0.18em] uppercase rounded-lg inline-flex items-center justify-center gap-2"
+                style={{
+                  background: "linear-gradient(135deg, rgba(220, 38, 38, 0.9), rgba(127, 29, 29, 0.7))",
+                  border: "1px solid rgba(220, 38, 38, 0.6)",
+                  boxShadow: "0 0 18px rgba(220, 38, 38, 0.35)",
+                  color: "#fef2f2",
+                }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M18.36 6.64a9 9 0 1 1-12.73 0" />
+                  <line x1="12" y1="2" x2="12" y2="12" />
+                </svg>
+                Shut Down
+              </button>
+            </div>
+          </HudCard>
+        </div>
+      )}
+
+      {/* Full-screen "safe to power off" overlay — shown after confirm.
+          Stays up until the Pi physically loses power (cleanup from the
+          OS halt). If the operator cancels mains-flip and the system
+          somehow stays alive, this overlay is the only thing they'll see. */}
+      {shuttingDown && (
+        <div className="fixed inset-0 z-[9800] flex flex-col items-center justify-center bg-black text-white">
+          <div className="text-[10px] tracking-[0.4em] uppercase text-slate-400 mb-4">Gillis V2</div>
+          <div className="text-3xl font-bold mb-3" style={{ color: "#fca5a5" }}>
+            Shutting down…
+          </div>
+          <div className="text-base text-slate-200 max-w-md text-center px-6 leading-relaxed mb-8">
+            The pendant is halting safely. The screen will go dark within ~20 seconds.
+          </div>
+          <div className="rounded-lg border border-amber-400/40 bg-amber-500/10 px-5 py-3 text-amber-100 text-sm font-semibold text-center max-w-md mx-6">
+            ⚠ Wait until the screen goes dark, then flip the main power switch.
+          </div>
+        </div>
+      )}
     </ScreenShell>
   );
 }

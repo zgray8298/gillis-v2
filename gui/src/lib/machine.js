@@ -142,6 +142,12 @@ export function createMachineClient({ url = DEFAULT_WS_URL, autoReconnect = true
     // operator sees the gantry square in real time; setTram is fired only on
     // the Save button to persist the final value.
     tramPreview: (mm) => send(`TRAM_PREVIEW ${mm}`),
+
+    // Halt the Pi cleanly so the operator can flip mains without risking
+    // SD-card corruption. The backend intercepts SHUTDOWN, replies OK
+    // immediately, then exec's `sudo /sbin/poweroff` ~1.5 s later — long
+    // enough for the GUI to switch to its "safe to power off" overlay.
+    shutdown: () => send('SHUTDOWN'),
     // Soft axis travel limits saved to Teensy EEPROM. New command — firmware
     // side will clamp moves to these values on top of the homing envelope.
     setTravelLimits: (limits) => send(`SET_TRAVEL ${JSON.stringify(limits)}`),

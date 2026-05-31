@@ -23,6 +23,12 @@ import './index.css'
 console.log('[gillis] viewport', window.innerWidth, 'x', window.innerHeight,
   ' devicePixelRatio=', window.devicePixelRatio);
 
+// StrictMode is enabled in dev to surface lifecycle bugs early. The machine
+// client (see useMachine.jsx) is created inside useEffect specifically so it
+// survives StrictMode's double-mount — earlier code created the client
+// during render via a useRef, which let the double-mount close the only
+// instance and leave the GUI stuck on "OFFLINE" in dev. Production builds
+// are unaffected either way (StrictMode is a no-op when bundled).
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <App />
