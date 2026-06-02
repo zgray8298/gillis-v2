@@ -3274,6 +3274,14 @@ function ProgramsScreen({ programs, setPrograms, addProgram, setScreen, onHome, 
   const [selectedCell, setSelectedCell] = useState(1);
   const [reweldedCells, setReweldedCells] = useState([]);
   const [usbImport, setUsbImport] = useState({ open: false, loading: false, files: [], error: null, importing: null });
+  // Park-to-loading gate shown when leaving Manual Cell Select. After manual
+  // jogging / firing the table is parked at an arbitrary cell (often with Z
+  // down), so every exit from the mode offers to return it to the loading
+  // position first. `after` holds the navigation to run once the operator has
+  // made the park decision (onBack / onHome for the shell buttons, null for
+  // the in-panel Exit which just drops back to Program Detail).
+  const [parkPrompt, setParkPrompt] = useState({ open: false, after: null });
+  const [movingToLoad, setMovingToLoad] = useState(false);
 
   const selectedProgram =
     programs.find((p) => p.name === selectedProgramName) ||
@@ -3556,11 +3564,65 @@ function ProgramsScreen({ programs, setPrograms, addProgram, setScreen, onHome, 
     );
   }
 
+  // ---- Manual Cell Select exit / park-to-loading -------------------------
+  // Drops the manual sub-mode and clears the rewelded-cell highlights. Shared
+  // tail of every park decision so the panel resets identically whether the
+  // operator moved the table or skipped.
+  const finishManualExit = () => {
+    setReweldedCells([]);
+    setManualMode(false);
+  };
+
+  // Open the park prompt instead of leaving immediately. `after` is the
+  // navigation to perform once the operator answers (onBack / onHome, or null
+  // for the in-panel Exit which stays on the Programs screen).
+  const requestManualExit = (after) => {
+    setParkPrompt({ open: true, after });
+  };
+
+  // Operator confirmed the park. Z UP -> XY to the stored loading position,
+  // then complete the exit and run any stashed navigation. Best-effort: a
+  // rejected motion, demo mode, or an unset / {0,0} loading position still
+  // tears down the overlay and completes the exit so nobody is stranded on a
+  // spinner.
+  const confirmParkAndExit = async () => {
+    const after = parkPrompt.after;
+    setParkPrompt({ open: false, after: null });
+    setMovingToLoad(true);
+    try { await machine.setZ('UP'); } catch { /* non-fatal */ }
+    const lp = machine.state.loadingPosition;
+    if (lp &&
+        Number.isFinite(Number(lp.x)) &&
+        Number.isFinite(Number(lp.y)) &&
+        (Number(lp.x) !== 0 || Number(lp.y) !== 0)) {
+      try { await machine.moveTo(Number(lp.x), Number(lp.y)); } catch { /* non-fatal */ }
+    }
+    setMovingToLoad(false);
+    finishManualExit();
+    after?.();
+  };
+
+  // Operator declined the park. Still raise Z — the head may be down from a
+  // manual fire and the next screen's motion would otherwise drag it across
+  // the work — then leave the table where it sits and complete the exit.
+  const skipParkAndExit = async () => {
+    const after = parkPrompt.after;
+    setParkPrompt({ open: false, after: null });
+    try { await machine.setZ('UP'); } catch { /* non-fatal */ }
+    finishManualExit();
+    after?.();
+  };
+
+  // Shell Back / Home: intercept only while in Manual Cell Select so the park
+  // gate runs first; outside manual mode they navigate immediately as before.
+  const handleScreenBack = () => { if (manualMode) requestManualExit(onBack); else onBack(); };
+  const handleScreenHome = () => { if (manualMode) requestManualExit(onHome); else onHome(); };
+
   const accent = accentFor("programs");
   const amber = accentFor("diagnostics");
 
   return (
-    <ScreenShell mode="programs" onHome={onHome} onBack={onBack}>
+    <ScreenShell mode="programs" onHome={handleScreenHome} onBack={handleScreenBack}>
       <div className="h-full min-h-0 grid grid-cols-12 gap-2">
         {!manualMode && (
           <HudCard
@@ -3727,10 +3789,7 @@ function ProgramsScreen({ programs, setPrograms, addProgram, setScreen, onHome, 
                     </button>
 
                     <button
-                      onClick={() => {
-                        setReweldedCells([]);
-                        setManualMode(false);
-                      }}
+                      onClick={() => requestManualExit(null)}
                       className="rounded-[0.75rem] h-10 bg-white/10 text-sm font-semibold"
                     >
                       Exit
@@ -3801,6 +3860,75 @@ function ProgramsScreen({ programs, setPrograms, addProgram, setScreen, onHome, 
           onRefresh={openUsbImport}
         />
       )}
+
+      {/* Manual Cell Select exit gate. After manual jogging / firing the table
+          is parked at an arbitrary cell, so on Exit / Back / Home we ask
+          before returning it to the loading position. Mirrors the post-save
+          park prompt on the Calibrate screen so the "okay to move table?"
+          gate looks identical wherever the gantry moves itself. */}
+      {parkPrompt.open && (
+        <div className="fixed inset-0 z-[9700] flex items-center justify-center bg-black/75 backdrop-blur-sm">
+          <HudCard
+            accent={amber.color}
+            accentRgb={amber.rgb}
+            className="p-6 w-[min(520px,92vw)]"
+          >
+            <div className="text-[10px] tracking-[0.32em] uppercase text-slate-300 mb-1">
+              Exiting Manual Cell Select
+            </div>
+            <div
+              className="text-xl font-bold mb-3"
+              style={{ color: amber.color }}
+            >
+              Okay to move table back to loading position?
+            </div>
+            <div className="text-sm text-slate-200 mb-3 leading-relaxed">
+              The table is parked at the last selected cell. It will raise Z
+              and travel to the stored loading position so the next operation
+              starts from a known reference. Clear any clamps, fixturing, or
+              parts from the table before continuing.
+            </div>
+            {machine.state.loadingPosition &&
+              Number.isFinite(Number(machine.state.loadingPosition.x)) &&
+              Number.isFinite(Number(machine.state.loadingPosition.y)) && (
+                <div className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-[11px] text-slate-300 leading-snug mb-5 font-mono">
+                  Loading position:&nbsp;X&nbsp;
+                  {Number(machine.state.loadingPosition.x).toFixed(2)} mm
+                  &nbsp;·&nbsp;Y&nbsp;
+                  {Number(machine.state.loadingPosition.y).toFixed(2)} mm
+                </div>
+              )}
+            <div className="flex items-center justify-end gap-3">
+              <button
+                onClick={skipParkAndExit}
+                className="h-11 px-5 text-xs font-semibold tracking-[0.15em] uppercase rounded-lg border border-white/10 bg-white/5 hover:bg-white/10"
+              >
+                Skip
+              </button>
+              <button
+                onClick={confirmParkAndExit}
+                className="h-11 px-5 text-xs font-bold tracking-[0.18em] uppercase rounded-lg"
+                style={{
+                  background: `linear-gradient(135deg, rgba(${amber.rgb},0.85), rgba(${amber.rgb},0.5))`,
+                  border: `1px solid rgba(${amber.rgb},0.5)`,
+                  boxShadow: `0 0 18px rgba(${amber.rgb},0.3)`,
+                  color: "#f0f9ff",
+                }}
+              >
+                Move Table
+              </button>
+            </div>
+          </HudCard>
+        </div>
+      )}
+
+      <LoadingOverlay
+        visible={movingToLoad}
+        title="Moving to loading position"
+        subtext="Raising Z and travelling to the stored loading position"
+      >
+        <HomingAxisTicker />
+      </LoadingOverlay>
     </ScreenShell>
   );
 }

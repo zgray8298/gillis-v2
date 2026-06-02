@@ -494,6 +494,11 @@ function reduce(prev, evt) {
             run: {
               ...prev.run,
               active: false,
+              // Abort is terminal — the UI auto-pauses (RUN_PAUSE) before
+              // sending RUN_ABORT, so without this the lingering paused=true
+              // keeps run-gated controls (e.g. the Settings Shut Down button)
+              // disabled with a misleading "a program is paused" reason.
+              paused: false,
               phase: 'aborted',
               programName: evt.programName || prev.run.programName,
               programId: evt.programId || prev.run.programId || null,

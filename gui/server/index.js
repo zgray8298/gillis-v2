@@ -101,16 +101,34 @@ async function routeCommand(cmd) {
   // See docs/SHUTDOWN_SETUP.md for the deploy step.
   if (verb === 'SHUTDOWN') {
     // eslint-disable-next-line no-console
-    console.log('[gillis backend] SHUTDOWN requested — scheduling system poweroff in ~1.5s');
+    console.log('[gillis backend] SHUTDOWN requested — scheduling clean poweroff in ~1.5s');
     setTimeout(() => {
-      const child = spawn('sudo', ['/sbin/poweroff'], {
+      // SD-safe halt: `systemctl poweroff` stops services, flushes and
+      // UNMOUNTS the filesystems before cutting power — that clean unmount is
+      // what protects the SD card from corruption (the legacy /sbin/poweroff
+      // path could hang on a straggler and leave the operator stuck on the
+      // splash). Absolute paths so this never depends on the PATH the backend
+      // happened to be launched with, and stdout/stderr are captured to the
+      // backend log (not discarded) so a failed or blocked poweroff is
+      // diagnosable via `tail /tmp/gillis-server.log`.
+      const child = spawn('/usr/bin/sudo', ['/usr/bin/systemctl', 'poweroff'], {
         detached: true,
-        stdio: 'ignore',
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
+      let out = '';
+      child.stdout?.on('data', (d) => { out += d.toString(); });
+      child.stderr?.on('data', (d) => { out += d.toString(); });
       child.on('error', (err) => {
         // eslint-disable-next-line no-console
         console.error('[gillis backend] poweroff exec failed:', err.message,
-          '\n  Check that the ionetic user has NOPASSWD sudo for /sbin/poweroff.');
+          '\n  Check that ionetic has NOPASSWD sudo for /usr/bin/systemctl poweroff.');
+      });
+      child.on('exit', (code, signal) => {
+        if (code !== 0) {
+          // eslint-disable-next-line no-console
+          console.error('[gillis backend] poweroff exited non-zero:',
+            JSON.stringify({ code, signal }), out ? `\n  output: ${out.trim()}` : '');
+        }
       });
       child.unref();
     }, 1500);

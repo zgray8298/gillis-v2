@@ -1,4 +1,4 @@
-# deploy-pi-onsite.ps1 - deploy when working from a fresh PC at a client site.
+# deploy-pi-onsite.ps1 — deploy when working from a fresh PC at a client site.
 #
 # Differences from deploy-pi.ps1:
 #   - Builds on the Pi instead of locally, so the client PC doesn't need Node.js.
@@ -18,14 +18,14 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$LocalProject = Join-Path $PSScriptRoot "gui"
+$LocalProject = Join-Path $PSScriptRoot "gillis-v2-ui-v2"
 
 function Write-Step($msg) {
   Write-Host ""
   Write-Host "==> $msg" -ForegroundColor Cyan
 }
 
-# Locate SSH key - explicit param wins, then ./gillis_deploy_key, then default ~/.ssh/id_ed25519
+# Locate SSH key — explicit param wins, then ./gillis_deploy_key, then default ~/.ssh/id_ed25519
 if (-not $SshKey) {
   $kitKey = Join-Path $PSScriptRoot "gillis_deploy_key"
   if (Test-Path $kitKey) {
@@ -83,7 +83,7 @@ if (-not (Test-Path $LocalProject)) {
 }
 
 # Copy source files (NOT node_modules, NOT dist) to Pi for building.
-# IMPORTANT: server/ must be included - the run orchestrator and serial drivers live there
+# IMPORTANT: server/ must be included — the run orchestrator and serial drivers live there
 # and Express serves dist/ via server/index.js, so a missing server/ leaves the Pi running an
 # older backend that may not understand the new GUI's commands.
 Write-Step "Pushing source to ${Target}:${PiProjectRoot}"
@@ -110,5 +110,5 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Step "Done. To pick up server/ changes, restart the backend on the Pi:"
-Write-Host "  ssh $Target 'pkill -f \"node server/index.js\"; cd $PiProjectRoot; nohup env GILLIS_SERIAL=real npm run server > /tmp/gillis-server.log 2>&1 &'" -ForegroundColor DarkGray
-Write-Host "Or just kill chromium and click the Gillis desktop icon - launcher script handles backend restart if it's down." -ForegroundColor DarkGray
+Write-Host "  ssh $Target 'pkill -f `"node server/index.js`"; cd $PiProjectRoot; nohup env GILLIS_SERIAL=real npm run server > /tmp/gillis-server.log 2>&1 &'" -ForegroundColor DarkGray
+Write-Host "Or just kill chromium and click the Gillis desktop icon — launcher script handles backend restart if it's down." -ForegroundColor DarkGray
