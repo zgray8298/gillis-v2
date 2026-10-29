@@ -39,10 +39,26 @@
 //     event on the OK so the UI's busy flag flips in real time.
 
 import { EventEmitter } from 'node:events';
+import { readdirSync } from 'node:fs';
 import { SerialPort } from 'serialport';
 import { ReadlineParser } from '@serialport/parser-readline';
 
 const DEFAULT_PATH = process.env.GILLIS_PORT || '/dev/ttyACM0';
+
+// Resolve the Teensy's port at every (re)open (2026-10-29). After a brief USB
+// drop-out the kernel can re-enumerate the Teensy as /dev/ttyACM1 (ttyACM0
+// is still held by our dying file handle), and a fixed /dev/ttyACM0 path
+// then retries forever — the GUI shows the Teensy as disconnected until a
+// reboot. /dev/serial/by-id/ is a stable link to whatever ttyACMn it got.
+// An explicit GILLIS_PORT always wins.
+function resolvePortPath(fallback) {
+  if (process.env.GILLIS_PORT) return process.env.GILLIS_PORT;
+  try {
+    const hit = readdirSync('/dev/serial/by-id').find((n) => /Teensy/i.test(n));
+    if (hit) return `/dev/serial/by-id/${hit}`;
+  } catch { /* no by-id dir (no USB serial devices yet) */ }
+  return fallback;
+}
 const DEFAULT_BAUD = Number(process.env.GILLIS_BAUD || 115200);
 const RECONNECT_MS = 1500;
 const REPLY_TIMEOUT_MS = 12_000;
@@ -327,6 +343,32 @@ export function createRealSerial({ path = DEFAULT_PATH, baudRate = DEFAULT_BAUD 
     }
   }
 
+  // Abort (2026-10-29). RUN_ABORT / ABORT / STOP halt the steppers
+  // instantly, so an in-flight MOVE / JOG will never get its DONE. The common
+  // case is the GUI's Abort button: it sends RUN_PAUSE first (firmware goes
+  // PAUSED, which lets the current move finish but emits no DONE), then
+  // RUN_ABORT. The stranded MOVE stayed at the head of the queue and ate the
+  // next replies — RUN_ABORT's OK, then Z UP's, then HOME's — so after an
+  // abort nothing seemed to respond until a restart. Fail those moves here,
+  // at the moment we send the abort. Z is NOT failed: the Z state machine
+  // keeps running through an abort and still emits its own DONE / FAULT.
+  const ABORT_VERBS = new Set(['RUN_ABORT', 'ABORT', 'STOP']);
+  const STEPPER_VERBS = new Set(['MOVE', 'JOG']);
+  function failStrandedMovesForAbort() {
+    for (let i = pending.length - 1; i >= 0; i--) {
+      const e = pending[i];
+      if (!STEPPER_VERBS.has(e.verb)) continue;
+      if (e.acked) {
+        pending.splice(i, 1);
+        clearTimeout(e.timer);
+        e.resolve({ ok: false, reply: 'ABORTED' });
+      } else {
+        // Its sync OK is still on the way — fail it when that arrives.
+        e.cancelOnAck = true;
+      }
+    }
+  }
+
   function snapshot() {
     // Deep clone so callers can't mutate our cache.
     return JSON.parse(JSON.stringify(state));
@@ -530,6 +572,12 @@ export function createRealSerial({ path = DEFAULT_PATH, baudRate = DEFAULT_BAUD 
           resolveReply({ ok: false, reply: `FAULT ${lastFaultCode}` });
           return;
         }
+        // An abort was sent while this move's OK was in flight — the steppers
+        // have been stopped, so no DONE will follow.
+        if (head.cancelOnAck) {
+          resolveReply({ ok: false, reply: 'ABORTED' });
+          return;
+        }
         head.acked = true;
         state.busy = true;
         return;
@@ -613,9 +661,10 @@ export function createRealSerial({ path = DEFAULT_PATH, baudRate = DEFAULT_BAUD 
 
   function open() {
     clearTimeout(reconnectTimer);
+    const portPath = resolvePortPath(path);
     let p;
     try {
-      p = new SerialPort({ path, baudRate, autoOpen: false });
+      p = new SerialPort({ path: portPath, baudRate, autoOpen: false });
     } catch (e) {
       // eslint-disable-next-line no-console
       console.error(`[gillis serial] failed to construct SerialPort(${path}): ${e.message}`);
@@ -646,18 +695,32 @@ export function createRealSerial({ path = DEFAULT_PATH, baudRate = DEFAULT_BAUD 
       if (err) {
         // Common on the Pi when the Teensy isn't plugged in yet — retry silently.
         // eslint-disable-next-line no-console
-        console.log(`[gillis serial] ${path} not available (${err.code || err.message}), retrying in ${RECONNECT_MS}ms`);
+        console.log(`[gillis serial] ${portPath} not available (${err.code || err.message}), retrying in ${RECONNECT_MS}ms`);
         port = null;
         scheduleReconnect();
         return;
       }
       // eslint-disable-next-line no-console
-      console.log(`[gillis serial] opened ${path} @ ${baudRate}`);
+      console.log(`[gillis serial] opened ${portPath} @ ${baudRate}`);
       setTeensyHealth('Connected');
       // Give the Teensy a moment to settle after USB enumeration, then ask
       // for a fresh snapshot so the UI rehydrates immediately.
       setTimeout(() => {
-        send('STATUS').catch(() => {});
+        send('STATUS')
+          .then((res) => {
+            // Stale run on the Teensy (2026-10-29). If the link dropped mid-run,
+            // the Pi's orchestrator has already ended the run (its pending
+            // command failed with "disconnected"), but the RUN_ABORT it sent
+            // couldn't reach the Teensy — so the firmware still believes a
+            // program is running and rejects HOME / MOVE with BUSY. Close it
+            // now. Firmware RUN_ABORT keeps any fault lockout in place.
+            if (/\bRUN (active|paused)\b/.test(res?.reply || '')) {
+              // eslint-disable-next-line no-console
+              console.log('[gillis serial] Teensy still has a run open after (re)connect - sending RUN_ABORT');
+              send('RUN_ABORT').then(() => send('STATUS')).catch(() => {});
+            }
+          })
+          .catch(() => {});
         send('SENSORS').catch(() => {});
       }, 250);
       // Rev4.1 heartbeat: keep the Teensy's link watchdog happy. We write raw
@@ -715,6 +778,8 @@ export function createRealSerial({ path = DEFAULT_PATH, baudRate = DEFAULT_BAUD 
           if (Number.isFinite(zt) && zt > 0) state.zTimeoutMs = zt;
         } catch { /* not our problem — firmware will ERR it */ }
       }
+
+      if (ABORT_VERBS.has(verb)) failStrandedMovesForAbort();
 
       const awaitingDone = MOTION_COMMANDS.has(verb);
       // MOVE/JOG can take many seconds; Z is bounded by the firmware's

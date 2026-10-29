@@ -528,6 +528,13 @@ inline void serial_dispatch(const char* cmd) {
     return;
   }
   if (ci_equals(cmd, "RUN_ABORT")) {
+    // Restored from ee6d715 (2026-10-29):
+    //  - 300 ms grace on single-driver ALM faults for the instant-stop pulse.
+    //  - No DONE is emitted for a move cut short here: the Pi's realSerial
+    //    fails stranded MOVE/JOG itself when it sends RUN_ABORT (it also
+    //    covers the PAUSED case, where this firmware never emits DONE). A
+    //    DONE from here as well would be an orphan reply.
+    fault_set_abort_grace(300);
     stepper_stop_all();
     run_abort();
     // Rev4.16 — never let RUN_ABORT paper over a lockout. The Pi now sends

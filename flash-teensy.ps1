@@ -150,17 +150,33 @@ fi
 echo "Stopping Gillis backend..."
 pkill -f "node .*server/index.js" || true
 sleep 1.5
+if pgrep -af "server/index.js" >/dev/null; then
+  echo "  backend still running - forcing it to stop"
+  pkill -9 -f "server/index.js" || true
+  sleep 1
+fi
 TTY=`$(ls /dev/serial/by-id/*Teensy* 2>/dev/null | head -1)
 [ -z "`$TTY" ] && TTY=`$(ls /dev/ttyACM* 2>/dev/null | head -1)
 if [ -n "`$TTY" ]; then
   echo "Rebooting Teensy into bootloader via `$TTY"
-  stty -F "`$TTY" 134 2>/dev/null || true
+  # The Teensy only reboots on a CHANGE of baud rate to 134, so step through
+  # 9600 first (a port left at 134 by an earlier attempt would do nothing).
+  stty -F "`$TTY" 9600 || echo "  (stty 9600 failed)"
+  sleep 0.3
+  stty -F "`$TTY" 134 || echo "  (stty 134 failed)"
 else
   echo "No Teensy serial port found (already in bootloader, or Gillis is off?) - waiting anyway"
 fi
 echo "Flashing (waits up to 60 s for the bootloader)..."
-timeout 60 teensy_loader_cli --mcu=TEENSY41 -w -v "`$HEX"
+timeout 15 teensy_loader_cli --mcu=TEENSY41 -w -v "`$HEX"
 RC=`$?
+if [ `$RC -eq 124 ]; then
+  # Fallback: ask teensy_loader_cli to do the soft reboot itself (USB
+  # control request), then keep waiting.
+  echo "No bootloader yet - trying teensy_loader_cli soft reboot..."
+  timeout 45 teensy_loader_cli --mcu=TEENSY41 -s -w -v "`$HEX"
+  RC=`$?
+fi
 if [ `$RC -eq 124 ]; then echo "ERROR: timed out waiting for the Teensy bootloader. Is Gillis powered on? If so, press the button on the Teensy once."; fi
 sleep 2
 echo "Restarting Gillis backend..."

@@ -81,6 +81,21 @@ void fault_trigger(FaultCode code);
 const char* fault_code_str(FaultCode code);
 
 // =============================================================================
+// Post-RUN_ABORT grace window — set by serial_protocol.h's RUN_ABORT handler
+// to suppress single-driver ALM fault detection during the brief transient
+// caused by stepper_stop_all()'s instant halt. fault_check() reads this and
+// short-circuits the per-axis ALM checks while in_abort_grace() is true.
+// E-stop detection (all 3 ALMs simultaneous) is NOT suppressed.
+// =============================================================================
+static uint32_t _abortGraceUntilMs = 0;
+inline void fault_set_abort_grace(uint32_t durationMs) {
+  _abortGraceUntilMs = millis() + durationMs;
+}
+inline bool in_abort_grace() {
+  return millis() < _abortGraceUntilMs;
+}
+
+// =============================================================================
 // Emergency stop all outputs — called on any hard fault
 // =============================================================================
 inline void emergency_stop_outputs() {
@@ -157,7 +172,15 @@ inline void fault_trigger(FaultCode code) {
   if (code == FAULT_ESTOP) {
     machineState.state       = STATE_ESTOP;
     machineState.activeFault = FAULT_ESTOP;
-    Serial.println("ESTOP");   // distinct event per Rev4
+    Serial.println("ESTOP");   // distinct event per Rev4 — the GUI uses this
+                               // to latch the persistent E-STOP pill.
+    // Also emit the standard FAULT line so the GUI's FaultLockoutOverlay
+    // opens with the FAULT_ESTOP code and walks the operator through
+    // clear -> home -> resume (restored from ee6d715, 2026-10-29). The Pi's
+    // realSerial FAULT handler also fails any command stranded mid-motion,
+    // so no "DONE" is emitted here (that older workaround would make the
+    // Pi think the interrupted MOVE / Z had succeeded).
+    fault_emit(FAULT_ESTOP);
     return;
   }
 
@@ -254,11 +277,18 @@ inline void fault_check() {
   }
 
   // --- Healthy — look for new faults ---
-  // E-stop detection: all three ALMs fire simultaneously
+  // E-stop detection: all three ALMs fire simultaneously. ALWAYS runs even
+  // during the post-abort grace window — a hardware E-stop press during a
+  // software abort recovery is still a real E-stop and must lock out.
   if (sensors.xDriverAlm && sensors.yLeftAlm && sensors.yRightAlm) {
     fault_trigger(FAULT_ESTOP);
     return;
   }
+
+  // Single-driver ALM checks are skipped for ~300 ms after RUN_ABORT: its
+  // instant stepper halt pulses the CL57Y ALM lines, which would otherwise
+  // trip FAULT_DRIVER_* (and force a re-home) on every deliberate abort.
+  if (in_abort_grace()) return;
 
   if (sensors.xDriverAlm) { fault_trigger(FAULT_DRIVER_X);  return; }
   if (sensors.yLeftAlm)   { fault_trigger(FAULT_DRIVER_YL); return; }

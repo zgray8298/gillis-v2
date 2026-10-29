@@ -27,8 +27,8 @@
 // --- Travel limits (mm) — DEFAULTS; live values kept in Settings --------------
 // These are the factory defaults used on first boot. Live values are
 // persisted in Settings.maxX / Settings.maxY and are updated by SET_TRAVEL.
-#define DEFAULT_AXIS_X_MAX_MM   400.0f   // Update to measured travel
-#define DEFAULT_AXIS_Y_MAX_MM   300.0f
+#define DEFAULT_AXIS_X_MAX_MM   340.0f   // Measured X travel (Rev4 onsite, May 2026)
+#define DEFAULT_AXIS_Y_MAX_MM   590.0f   // Measured Y travel (Rev4 onsite, May 2026)
 
 // --- Homing ------------------------------------------------------------------
 // 2026-10-29: raised 20 -> 40 mm/s. At 20 mm/s a home started from the
@@ -44,10 +44,14 @@
 #define HOME_DIR_Y              LOW
 
 // After Y homes, gantry advances this far in +Y before X begins homing.
-// This is a mechanical clearance step — keeps the Y carriage clear of the
-// X-home hardstop / sensor region so X can seek without collision.
-// Sequence:  Y fast → Y back-off → Y slow → Y ADVANCE +100mm → X fast → ...
-#define HOMING_Y_ADVANCE_MM     100.0f
+// This was a mechanical clearance step to keep the Y carriage clear of the
+// X-home hardstop / sensor region. Set to 0 onsite (May 2026) — tested in
+// place and confirmed there's no collision risk between Y-home position
+// and X-homing travel on the assembled machine. The HOMING_Y_ADVANCE state
+// will still run, but stepper_jog_mm(axis, 0) short-circuits immediately
+// so the state transitions straight through to HOMING_X_FAST.
+// Sequence:  Y fast → Y back-off → Y slow → (Y ADVANCE 0mm, no-op) → X fast → ...
+#define HOMING_Y_ADVANCE_MM     0.0f
 
 // --- Default motion parameters -----------------------------------------------
 // Two profiles persisted independently (Rev4.3):

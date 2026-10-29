@@ -50,6 +50,17 @@ const orchestrator = serial.emitEvent
   ? createRunOrchestrator({ send: serial.send, emit: serial.emitEvent })
   : null;
 
+// End any active run the moment the Teensy link drops (see
+// runOrchestrator.abortForDisconnect). realSerial reports the drop as a
+// snapshot whose health.teensy is 'Disconnected'.
+if (orchestrator) {
+  serial.on('event', (evt) => {
+    if (evt?.type === 'snapshot' && evt.state?.health?.teensy === 'Disconnected') {
+      orchestrator.abortForDisconnect();
+    }
+  });
+}
+
 // Pi-side E-stop button monitor (pendant-mounted button → Pi GPIO).
 // Opt-in via GILLIS_ESTOP_PIN env var so dev / mock runs aren't affected.
 // See gui/server/piGpioEstop.js for wiring + rationale.

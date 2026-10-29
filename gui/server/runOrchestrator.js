@@ -616,6 +616,16 @@ export function createRunOrchestrator({ send, emit }) {
     return null; // not a run command
   }
 
+  // Teensy link dropped (2026-10-29). Any command in flight already failed
+  // with "ERROR disconnected", but if the loop was between commands (a weld
+  // hold, a pause) it could otherwise carry on against a Teensy that has
+  // since rebooted or lost its run context. End the run now; realSerial
+  // closes the firmware side when the link comes back.
+  function abortForDisconnect() {
+    if (!active) return;
+    finish('aborted', 'Teensy connection lost');
+  }
+
   function isRunCommand(verb) {
     return verb === 'RUN_START' || verb === 'RUN_PAUSE' ||
            verb === 'RUN_RESUME' || verb === 'RUN_ABORT';
@@ -629,5 +639,5 @@ export function createRunOrchestrator({ send, emit }) {
     };
   }
 
-  return { handle, isRunCommand, snapshot };
+  return { handle, isRunCommand, snapshot, abortForDisconnect };
 }
