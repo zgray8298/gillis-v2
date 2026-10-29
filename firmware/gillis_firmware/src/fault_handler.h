@@ -81,21 +81,6 @@ void fault_trigger(FaultCode code);
 const char* fault_code_str(FaultCode code);
 
 // =============================================================================
-// Post-RUN_ABORT grace window — set by serial_protocol.h's RUN_ABORT handler
-// to suppress single-driver ALM fault detection during the brief transient
-// caused by stepper_stop_all()'s instant halt. fault_check() reads this and
-// short-circuits the per-axis ALM checks while in_abort_grace() is true.
-// E-stop detection (all 3 ALMs simultaneous) is NOT suppressed.
-// =============================================================================
-static uint32_t _abortGraceUntilMs = 0;
-inline void fault_set_abort_grace(uint32_t durationMs) {
-  _abortGraceUntilMs = millis() + durationMs;
-}
-inline bool in_abort_grace() {
-  return millis() < _abortGraceUntilMs;
-}
-
-// =============================================================================
 // Emergency stop all outputs — called on any hard fault
 // =============================================================================
 inline void emergency_stop_outputs() {
@@ -110,6 +95,32 @@ inline void emergency_stop_outputs() {
   machineState.zDown          = false;
   machineState.laserActive    = false;
   machineState.driversEnabled = false;
+}
+
+// =============================================================================
+// Soft-fault outputs (Rev4.16) — used for Z sensor timeouts.
+// A Z timeout is a pneumatics/sensor problem, not an XY motion hazard: the
+// steppers are already stationary (Z is only commanded with no axis moving).
+// Previously every fault went through emergency_stop_outputs(), which
+// DISABLED the stepper drivers — the gantry lost holding torque, the step
+// counters could no longer be trusted, and after dismissing a Z timeout the
+// machine was effectively lost and had to be re-homed. Keep the drivers
+// energised (position held) and only make the tooling safe: solenoids off
+// (spring-return Z up) and laser off.
+// =============================================================================
+inline bool fault_is_soft(FaultCode code) {
+  return code == FAULT_Z_TIMEOUT_DOWN || code == FAULT_Z_TIMEOUT_UP;
+}
+
+inline void soft_stop_outputs() {
+  stepper_stop_all();
+  digitalWrite(PIN_Z_SOLENOID_A, HIGH);
+  digitalWrite(PIN_Z_SOLENOID_B, HIGH);
+  digitalWrite(PIN_Z_SOLENOID_C, HIGH);
+  digitalWrite(PIN_LASER_RELAY,  HIGH);
+  machineState.zDown       = false;
+  machineState.laserActive = false;
+  // driversEnabled intentionally untouched
 }
 
 // =============================================================================
@@ -140,37 +151,13 @@ inline void fault_trigger(FaultCode code) {
   // Only record the first fault — subsequent ones while locked out are swallowed
   if (machineState.activeFault != FAULT_NONE) return;
 
-  // If motion was in flight when the fault fires, the Pi's orchestrator is
-  // awaiting DONE for the current MOVE / Z. The transition into STATE_ESTOP /
-  // STATE_FAULT_LOCKOUT below bypasses the STATE_MOVING / STATE_WELDING edge
-  // detector in state_update() that would normally emit DONE on motion stop,
-  // so the Pi's pending send() sits in the realSerial queue until the 60 s
-  // MOTION_REPLY_TIMEOUT_MS. That stale queue head swallows every
-  // subsequent OK reply (e.g. HOME's sync ack) and leaves the operator
-  // unable to home/move after an E-stop until a power cycle. Emit DONE
-  // here so the pending entry resolves cleanly before the fault state
-  // takes effect — mirroring the fix in serial_protocol.h for RUN_ABORT.
-  const bool wasInMotion = (machineState.state == STATE_MOVING ||
-                            machineState.state == STATE_WELDING);
-
-  emergency_stop_outputs();
-
-  if (wasInMotion) Serial.println("DONE");
+  if (fault_is_soft(code)) soft_stop_outputs();
+  else                     emergency_stop_outputs();
 
   if (code == FAULT_ESTOP) {
     machineState.state       = STATE_ESTOP;
     machineState.activeFault = FAULT_ESTOP;
-    Serial.println("ESTOP");   // distinct event per Rev4 — the GUI uses this
-                               // to latch the persistent E-STOP pill.
-    // Also emit the standard FAULT line so the GUI's FaultLockoutOverlay
-    // (which keys off fault.active in the reducer) opens up with the
-    // FAULT_ESTOP code and walks the operator through clear -> home ->
-    // resume. Without this, an E-stop hit just flips a status pill silently
-    // and the operator gets no prompt that the axes are now lost and need
-    // re-homing. The GUI status pill code at App.jsx:814 explicitly notes
-    // that estop.active "typically also" comes with fault.active — this
-    // line makes that contract true.
-    fault_emit(FAULT_ESTOP);
+    Serial.println("ESTOP");   // distinct event per Rev4
     return;
   }
 
@@ -267,24 +254,11 @@ inline void fault_check() {
   }
 
   // --- Healthy — look for new faults ---
-  // E-stop detection: all three ALMs fire simultaneously. ALWAYS runs even
-  // during the post-abort grace window — a hardware E-stop press during a
-  // software abort recovery is still a real E-stop and must lock out.
+  // E-stop detection: all three ALMs fire simultaneously
   if (sensors.xDriverAlm && sensors.yLeftAlm && sensors.yRightAlm) {
     fault_trigger(FAULT_ESTOP);
     return;
   }
-
-  // Single-driver ALM checks. RUN_ABORT does stepper_stop_all() — an instant
-  // halt with no decel — which momentarily pulses the CL57Y ALM lines as
-  // the motors slam to zero. Without the grace window we'd trip
-  // FAULT_DRIVER_X/YL/YR on every deliberate operator abort, force a
-  // re-home (because the reducer flags those as requiresHome=true), and
-  // leave the operator unable to recover the run without a power cycle.
-  // The grace timestamp is set by serial_protocol.h's RUN_ABORT handler
-  // for ~300 ms (enough for the ALM transient to subside; brake torque
-  // from the still-energised drivers settles long before then).
-  if (in_abort_grace()) return;
 
   if (sensors.xDriverAlm) { fault_trigger(FAULT_DRIVER_X);  return; }
   if (sensors.yLeftAlm)   { fault_trigger(FAULT_DRIVER_YL); return; }

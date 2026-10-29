@@ -12,9 +12,10 @@
 // from a solenoid-swap can't linger.
 //
 // Z_DOWN: energise selected solenoid — wait Z_DOWN_SENSOR
-//          (2s timeout = FAULT_Z_TIMEOUT_DOWN)
+//          (z_timeout_ms() timeout = FAULT_Z_TIMEOUT_DOWN)
 // Z_UP:   de-energise all solenoids — spring return — wait Z_UP_SENSOR
-//          (2s timeout = FAULT_Z_TIMEOUT_UP)
+//          (z_timeout_ms() timeout = FAULT_Z_TIMEOUT_UP)
+// The timeout is operator-configurable (Settings → Z Timeout), default 5 s.
 // =============================================================================
 
 #include <Arduino.h>
@@ -108,7 +109,7 @@ inline void z_update() {
         _zState    = Z_DOWN_HOLD;
         _zMoveDone = true;
         Serial.println("DONE");
-      } else if ((millis() - _zCmdTime) >= Z_TIMEOUT_DOWN_MS) {
+      } else if ((millis() - _zCmdTime) >= z_timeout_ms()) {
         _zState = Z_IDLE;
         fault_trigger(FAULT_Z_TIMEOUT_DOWN);
       }
@@ -119,7 +120,7 @@ inline void z_update() {
         _zState    = Z_UP_HOLD;
         _zMoveDone = true;
         Serial.println("DONE");
-      } else if ((millis() - _zCmdTime) >= Z_TIMEOUT_UP_MS) {
+      } else if ((millis() - _zCmdTime) >= z_timeout_ms()) {
         _zState = Z_IDLE;
         fault_trigger(FAULT_Z_TIMEOUT_UP);
       }

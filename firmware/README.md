@@ -211,11 +211,21 @@ ESTOP
 ESTOP_CLEARED
 ```
 
+### Z timeout (Rev4.16)
+The Z DOWN / Z UP sensor timeout is an EEPROM setting (0.5–25.5 s, 0.1 s
+steps, default 5 s). Set it from the Pi Settings screen ("Z Timeout (ms)"),
+or directly with `SETMOTION {"zTimeoutMs":6000}`. SNAPSHOT reports it as
+`ZTIMEOUT<ms>`. Z timeout faults are *soft*: the solenoids and laser are
+switched off but the stepper drivers stay enabled, so the machine keeps its
+position and the run can be resumed after `CLEAR_FAULT` without re-homing.
+`HOME` also auto-clears a Z timeout once the Z-up sensor confirms.
+`RUN_ABORT` no longer forces IDLE while a fault lockout is active.
+
 ### Fault Codes
 ```
 FAULT_LOW_AIR           Air below threshold (default 4.1 bar / 60 PSI)
-FAULT_Z_TIMEOUT_DOWN    Z didn't extend within 2 s
-FAULT_Z_TIMEOUT_UP      Z didn't retract within 2 s
+FAULT_Z_TIMEOUT_DOWN    Z didn't extend within the Z timeout (default 5 s)
+FAULT_Z_TIMEOUT_UP      Z didn't retract within the Z timeout (default 5 s)
 FAULT_DRIVER_X          X CL57Y ALM active
 FAULT_DRIVER_YL         Y left CL57Y ALM active
 FAULT_DRIVER_YR         Y right CL57Y ALM active

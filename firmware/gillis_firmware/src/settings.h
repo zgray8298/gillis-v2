@@ -93,9 +93,16 @@ struct Settings {
   // does NOT need to be bumped on upgrade.
   uint8_t  benchMode;
 
+  // Z sensor timeout (Rev4.16) in TENTHS of a second (5..255 → 0.5..25.5 s).
+  // One byte stolen from _reserved[] so the struct layout (and therefore
+  // EEPROM_MAGIC_VALUE) is unchanged. Reserved bytes were zeroed by
+  // settings_defaults(), so an upgraded unit reads 0 here — z_timeout_ms()
+  // treats 0 as "use DEFAULT_Z_TIMEOUT_MS".
+  uint8_t  zTimeoutDs;
+
   // Reserved — keeps struct layout stable for minor additions without bumping
   // EEPROM_MAGIC_VALUE. Bump magic if you consume these.
-  uint8_t  _reserved[5];
+  uint8_t  _reserved[4];
 };
 
 extern Settings settings;
@@ -127,6 +134,7 @@ inline void settings_defaults() {
   settings.activeSolenoid  = DEFAULT_ACTIVE_SOLENOID;
   settings.homeOnBoot      = 0;  // default OFF — operator is prompted
   settings.benchMode       = 0;  // default OFF — real homing cycle with slow re-touch
+  settings.zTimeoutDs      = (uint8_t)(DEFAULT_Z_TIMEOUT_MS / 100);
   for (uint8_t i = 0; i < sizeof(settings._reserved); ++i) settings._reserved[i] = 0;
 }
 
@@ -141,6 +149,19 @@ inline void settings_load() {
   } else {
     EEPROM.get(EEPROM_SETTINGS_ADDR, settings);
   }
+}
+
+// Effective Z sensor timeout in ms (0 / unset → compile-time default).
+inline uint32_t z_timeout_ms() {
+  uint32_t ms = (uint32_t)settings.zTimeoutDs * 100UL;
+  return ms ? ms : (uint32_t)DEFAULT_Z_TIMEOUT_MS;
+}
+
+// Store a Z timeout given in ms — rounded to 0.1 s and clamped to range.
+inline void z_timeout_set_ms(long ms) {
+  if (ms < Z_TIMEOUT_MIN_MS) ms = Z_TIMEOUT_MIN_MS;
+  if (ms > Z_TIMEOUT_MAX_MS) ms = Z_TIMEOUT_MAX_MS;
+  settings.zTimeoutDs = (uint8_t)((ms + 50) / 100);
 }
 
 inline void settings_save() {

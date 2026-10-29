@@ -54,15 +54,16 @@ const HEARTBEAT_MS = 500;
 // Longer timeout for MOVE / JOG — a full-travel move can take several seconds
 // and we don't want to prematurely give up on the cell loop.
 const MOTION_REPLY_TIMEOUT_MS = 60_000;
-// Z DOWN / Z UP timeout. Pneumatic solenoid + sensor confirmation; physical
-// stroke is well under 2 s even with aggressive flow restrictors. Firmware's
-// own Z_TIMEOUT_*_MS is 2000 ms — anything beyond ~3 s on the Pi side is dead
-// time waiting for a DONE that's never coming (the firmware will have raised
-// FAULT_Z_TIMEOUT_* already). 3500 ms gives 500 ms of slack past the firmware
-// timeout, so the firmware fault arrives first and we resolve via that path
-// rather than the JS-side timeout. Critical for abort responsiveness — using
-// MOTION_REPLY_TIMEOUT_MS here would mean a 60 s wait after a USER_ABORT mid-Z.
-const Z_REPLY_TIMEOUT_MS = 3_500;
+// Z DOWN / Z UP timeout (Rev4.16). The firmware's Z sensor timeout is now an
+// operator setting (Settings → Z Timeout, default 5000 ms) reported in
+// SNAPSHOT as ZTIMEOUT<ms> and sent down via SETMOTION {zTimeoutMs}. The
+// JS-side timeout is only a backstop: when the firmware gives up it emits
+// FAULT FAULT_Z_TIMEOUT_*, and the FAULT handler below fails the pending Z
+// immediately. We allow the firmware timeout + 1.5 s of slack so the
+// firmware fault always lands first. (The old fixed 3.5 s here would now
+// fire BEFORE a 5 s firmware timeout and mis-report "ERROR timeout".)
+const DEFAULT_Z_TIMEOUT_MS = 5_000;
+const Z_REPLY_SLACK_MS = 1_500;
 
 // Commands that never elicit a reply line — just fire-and-forget.
 const NO_REPLY_COMMANDS = new Set(['SENSORS']);
@@ -197,6 +198,7 @@ function parseSnapshot(line) {
   const postWeld = get(/\bPOSTWELD(\d+)/);
   const homeboot = get(/\bHOMEBOOT([01])/);
   const benchmode = get(/\bBENCHMODE([01])/);
+  const ztimeout = get(/\bZTIMEOUT(\d+)/);
   const fault = get(/\bFAULT([A-Z_]+)/);
 
   if (x !== undefined || y !== undefined || zm) {
@@ -232,6 +234,7 @@ function parseSnapshot(line) {
   }
   if (homeboot !== undefined) patch.homeOnBoot = homeboot === '1';
   if (benchmode !== undefined) patch.benchMode = benchmode === '1';
+  if (ztimeout !== undefined) patch.zTimeoutMs = parseInt(ztimeout, 10);
   if (fault) patch._fault = fault;
 
   return patch;
@@ -264,6 +267,9 @@ export function createRealSerial({ path = DEFAULT_PATH, baudRate = DEFAULT_BAUD 
     loadingPosition: { x: 305, y: 585, z: 'UP' },
     homeOnBoot: false,
     benchMode: false,
+    // Firmware Z sensor timeout (ms). Updated from SNAPSHOT (ZTIMEOUT) and
+    // from outgoing SETMOTION {zTimeoutMs}. Drives the Z reply backstop.
+    zTimeoutMs: DEFAULT_Z_TIMEOUT_MS,
     travelLimits: { maxX: 910, maxY: 1170 },
     sensors: {
       xHome: false, yLeftHome: false, yRightHome: false,
@@ -285,6 +291,41 @@ export function createRealSerial({ path = DEFAULT_PATH, baudRate = DEFAULT_BAUD 
   // Track the verb of the most recently-sent command so we can synthesise
   // {homing, phase:'start'} on a HOME → OK round-trip.
   let lastVerb = null;
+  // Rev4.16 — line/fault sequencing so a FAULT can fail the commands it
+  // strands. `lineSeq` increments on every received line; each pending entry
+  // records the seq at send time, and `lastFaultSeq` the seq of the most
+  // recent FAULT line. An awaiting-DONE command whose sync OK arrives AFTER a
+  // fault that post-dates its send (e.g. Z DOWN refused on low air: the
+  // firmware prints FAULT then OK, and never DONE) is failed straight away.
+  let lineSeq = 0;
+  let lastFaultSeq = -1;
+  let lastFaultCode = null;
+
+  function zReplyTimeoutMs() {
+    const fw = Number(state.zTimeoutMs);
+    const base = Number.isFinite(fw) && fw > 0 ? fw : DEFAULT_Z_TIMEOUT_MS;
+    return base + Z_REPLY_SLACK_MS;
+  }
+
+  // Fail every pending command that the firmware will never answer now that
+  // it has dropped into a fault: motion/Z commands already acked with OK and
+  // waiting for a DONE (the fault path stops the steppers / Z FSM without
+  // emitting DONE), and FIRE (laser_fire() faults instead of replying when
+  // its Z-down / air interlock trips). Leaving them queued desynchronised the
+  // FIFO reply matching: the operator's next command (HOME, CLEAR_FAULT, …)
+  // had its reply consumed by the stranded Z entry — which is how a Z timeout
+  // left the run "still going" and HOME apparently doing nothing.
+  function failStrandedPending(code) {
+    const reply = `FAULT ${code}`;
+    for (let i = pending.length - 1; i >= 0; i--) {
+      const e = pending[i];
+      if ((e.awaitingDone && e.acked) || e.verb === 'FIRE') {
+        pending.splice(i, 1);
+        clearTimeout(e.timer);
+        e.resolve({ ok: false, reply });
+      }
+    }
+  }
 
   function snapshot() {
     // Deep clone so callers can't mutate our cache.
@@ -333,6 +374,7 @@ export function createRealSerial({ path = DEFAULT_PATH, baudRate = DEFAULT_BAUD 
   function handleLine(raw) {
     const line = String(raw).replace(/\r$/, '').trim();
     if (!line) return;
+    lineSeq += 1;
 
     // TEMP DIAGNOSTIC for the homing-flash regression (#66) — logs every
     // serial line with a millisecond timestamp so we can see ordering of
@@ -414,6 +456,12 @@ export function createRealSerial({ path = DEFAULT_PATH, baudRate = DEFAULT_BAUD 
             const ci = rest.match(/cellIndex=(-?\d+)/);
             const evt = { type: 'fault', code };
             if (ci) evt.cellIndex = Number(ci[1]);
+            lastFaultSeq = lineSeq;
+            lastFaultCode = code;
+            // Resolve stranded commands BEFORE emitting, so the run
+            // orchestrator bails on this fault right away instead of
+            // waiting out a JS-side reply timeout.
+            failStrandedPending(code);
             emit(evt);
             state.busy = false;
             return;
@@ -432,7 +480,12 @@ export function createRealSerial({ path = DEFAULT_PATH, baudRate = DEFAULT_BAUD 
             // cell. For every OTHER cell it briefly shows the PREVIOUS
             // cell between iterations. Drop firmware phase=cell events on
             // the floor — the orchestrator already covers this.
-            if (r && r.phase !== 'cell') emit({ type: 'run', ...r });
+            //
+            // Rev4.16: also drop firmware phase=aborted. The orchestrator
+            // emits its own 'aborted' (with programId / cellIndex / reason)
+            // and now always forwards RUN_ABORT to the firmware — the
+            // firmware's echo would land afterwards and wipe the reason.
+            if (r && r.phase !== 'cell' && r.phase !== 'aborted') emit({ type: 'run', ...r });
             return;
           }
         }
@@ -451,6 +504,7 @@ export function createRealSerial({ path = DEFAULT_PATH, baudRate = DEFAULT_BAUD 
       if (patch.motionSettings) state.motionSettings  = { ...state.motionSettings, ...patch.motionSettings };
       if ('homeOnBoot' in patch) state.homeOnBoot      = patch.homeOnBoot;
       if ('benchMode' in patch)  state.benchMode        = patch.benchMode;
+      if (Number.isFinite(patch.zTimeoutMs) && patch.zTimeoutMs > 0) state.zTimeoutMs = patch.zTimeoutMs;
 
       // Rebroadcast the snapshot — cheap, keeps the UI coherent even if the
       // STATUS wasn't in response to an explicit user request.
@@ -469,6 +523,14 @@ export function createRealSerial({ path = DEFAULT_PATH, baudRate = DEFAULT_BAUD 
       // DON'T resolve yet — we wait for DONE so the caller knows motion has
       // actually finished before issuing the next step in the cell loop.
       if (head && head.awaitingDone) {
+        // Accepted — but if the firmware faulted after we sent it (FAULT is
+        // printed before this OK when e.g. Z DOWN trips the low-air gate) no
+        // DONE will ever follow, so fail it now rather than hang.
+        if (lastFaultSeq > head.seq) {
+          resolveReply({ ok: false, reply: `FAULT ${lastFaultCode}` });
+          return;
+        }
+        head.acked = true;
         state.busy = true;
         return;
       }
@@ -643,11 +705,22 @@ export function createRealSerial({ path = DEFAULT_PATH, baudRate = DEFAULT_BAUD 
         return resolve({ ok: true, reply: 'OK' });
       }
 
+      // Keep our copy of the firmware Z timeout in step with what the UI
+      // is about to save, so the reply backstop is right immediately (before
+      // the next SNAPSHOT round-trip).
+      if (verb === 'SETMOTION') {
+        try {
+          const body = JSON.parse(cmd.slice(cmd.indexOf(' ') + 1));
+          const zt = Number(body?.zTimeoutMs);
+          if (Number.isFinite(zt) && zt > 0) state.zTimeoutMs = zt;
+        } catch { /* not our problem — firmware will ERR it */ }
+      }
+
       const awaitingDone = MOTION_COMMANDS.has(verb);
-      // MOVE/JOG can take many seconds; Z is bounded by the firmware's 2 s
-      // sensor timeout; everything else falls back to the generic 12 s.
+      // MOVE/JOG can take many seconds; Z is bounded by the firmware's
+      // configurable sensor timeout; everything else falls back to 12 s.
       let timeoutMs;
-      if (verb === 'Z') timeoutMs = Z_REPLY_TIMEOUT_MS;
+      if (verb === 'Z') timeoutMs = zReplyTimeoutMs();
       else if (awaitingDone) timeoutMs = MOTION_REPLY_TIMEOUT_MS;
       else timeoutMs = REPLY_TIMEOUT_MS;
       const timer = setTimeout(() => {
@@ -658,7 +731,7 @@ export function createRealSerial({ path = DEFAULT_PATH, baudRate = DEFAULT_BAUD 
         }
       }, timeoutMs);
 
-      pending.push({ resolve, timer, command: cmd, verb, awaitingDone });
+      pending.push({ resolve, timer, command: cmd, verb, awaitingDone, acked: false, seq: lineSeq });
       port.write(cmd + '\n', (err) => {
         if (err) {
           const idx = pending.findIndex((p) => p.timer === timer);

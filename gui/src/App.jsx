@@ -391,6 +391,20 @@ const initialMotionSettings = {
   // operator tunes them.
   preWeldHoldMs: 0,
   postWeldHoldMs: 0,
+  // Rev4.16 — Z DOWN / Z UP sensor timeout (ms). How long the firmware waits
+  // for the Z up/down sensor before raising FAULT_Z_TIMEOUT_*. Was a fixed
+  // 2000 ms in firmware — too tight for the spring-return Z UP.
+  zTimeoutMs: 5000,
+};
+
+// Z timeout bounds — mirror firmware Z_TIMEOUT_MIN_MS / Z_TIMEOUT_MAX_MS
+// (stored as tenths of a second in a single EEPROM byte).
+const Z_TIMEOUT_MIN_MS = 500;
+const Z_TIMEOUT_MAX_MS = 25500;
+const clampZTimeout = (v) => {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return 5000;
+  return Math.min(Z_TIMEOUT_MAX_MS, Math.max(Z_TIMEOUT_MIN_MS, Math.round(n / 100) * 100));
 };
 
 // Soft axis travel limits — the firmware clamps every MOVE/JOG to these
@@ -423,12 +437,12 @@ const FAULT_DESCRIPTIONS = {
   },
   FAULT_Z_TIMEOUT_DOWN: {
     title: "Z Down Timeout",
-    body: "The Z stage did not reach the DOWN sensor within 2s. Check the pneumatics and Z hardware before continuing.",
+    body: "The Z stage did not reach the DOWN sensor within {zTimeout}. The solenoid has been released and the laser is off. The X/Y drivers are still enabled, so the machine has kept its position. Check the pneumatics and Z sensor, then Clear Fault to resume or Abort Program to end the run.",
     eStop: false,
   },
   FAULT_Z_TIMEOUT_UP: {
     title: "Z Up Timeout",
-    body: "The Z stage did not retract to the UP sensor within 2s. Critical — verify the Z head is physically clear before homing.",
+    body: "The Z stage did not retract to the UP sensor within {zTimeout}. Verify the Z head is physically clear of the part. The X/Y drivers are still enabled, so the machine has kept its position. Clear Fault to resume or Abort Program to end the run. If this keeps happening, increase Z Timeout in Settings.",
     eStop: false,
   },
   FAULT_DRIVER_X: {
@@ -3359,17 +3373,9 @@ function ProgramsScreen({ programs, setPrograms, addProgram, setScreen, onHome, 
   const handleManualZDown = () => { machine.setZ('DOWN'); };
   const handleManualZUp   = () => { machine.setZ('UP'); };
 
-  // Fire Laser: actually fire the laser via the firmware FIRE command, then
-  // mark the cell as rewelded in the UI (the existing visual cue — coloured
-  // dot on the pattern graphic — works off `reweldedCells`). Previous
-  // behaviour only updated the UI state and never sent FIRE to the firmware,
-  // so the laser never pulsed.
-  const handleManualFire = async () => {
-    try { await machine.fire(); } catch { /* non-fatal — operator can retry */ }
-    if (!reweldedCells.includes(selectedCell)) {
-      setReweldedCells([...reweldedCells, selectedCell]);
-    }
-  };
+  // Fire Laser button removed from Manual Cell Select (2026-10-29, operator
+  // request) — manual mode is move / Z only; the laser only fires during a
+  // program run.
 
   const updateProgramStartPosition = (programName, modeName, pos) => {
     setPrograms((prev) =>
@@ -3780,13 +3786,6 @@ function ProgramsScreen({ programs, setPrograms, addProgram, setScreen, onHome, 
                         Z Up
                       </button>
                     </div>
-
-                    <button
-                      onClick={handleManualFire}
-                      className="rounded-[0.75rem] h-10 bg-red-600 text-sm font-semibold hover:bg-red-500"
-                    >
-                      Fire Laser
-                    </button>
 
                     <button
                       onClick={() => requestManualExit(null)}
@@ -5465,6 +5464,9 @@ function SettingsScreen({
       dwellMs: Number(motionSettings.zDownDwell),
       preWeldHoldMs:  Number(motionSettings.preWeldHoldMs)  || 0,
       postWeldHoldMs: Number(motionSettings.postWeldHoldMs) || 0,
+      // Rev4.16 — Z sensor timeout. Clamped/rounded to what the firmware can
+      // store (0.5–25.5 s in 0.1 s steps). Older firmware ignores the key.
+      zTimeoutMs: clampZTimeout(motionSettings.zTimeoutMs),
     };
     const travelPayload = {
       maxX: Number(travelLimits.maxX),
@@ -5685,6 +5687,9 @@ function SettingsScreen({
                     <SettingsFieldButton accentRgb={accent.rgb} openKeypad={openKeypad} label="Pre-weld Hold (ms)"  title="Pre-weld Hold (after Z Down)"  value={motionSettings.preWeldHoldMs}  apply={(v) => update("preWeldHoldMs", v)} />
                     <SettingsFieldButton accentRgb={accent.rgb} openKeypad={openKeypad} label="Laser On Time (ms)"  title="Laser On Time"                 value={motionSettings.zDownDwell}     apply={(v) => update("zDownDwell", v)} />
                     <SettingsFieldButton accentRgb={accent.rgb} openKeypad={openKeypad} label="Post-weld Hold (ms)" title="Post-weld Hold (before Z Up)" value={motionSettings.postWeldHoldMs} apply={(v) => update("postWeldHoldMs", v)} />
+                    {/* Rev4.16 — how long the firmware waits for the Z up/down
+                        sensor before faulting (FAULT_Z_TIMEOUT_*). 500–25500 ms. */}
+                    <SettingsFieldButton accentRgb={accent.rgb} openKeypad={openKeypad} label="Z Timeout (ms)" title="Z Sensor Timeout (500–25500 ms)" value={motionSettings.zTimeoutMs ?? 5000} apply={(v) => update("zTimeoutMs", clampZTimeout(v))} />
                   </div>
                 </div>
               </HudCard>
@@ -7496,6 +7501,14 @@ function AppInner() {
             ? Number(s.airThresholdBar) : null;
           if (tl) setTravelLimits(tl);
           if (ms) setMotionSettings(ms);
+          // Rev4.16 — re-assert the saved Z timeout on the firmware at every
+          // connect (the Pi file is the source of truth; a reflashed or
+          // swapped Teensy would otherwise fall back to its 5 s default).
+          if (ms && Number(ms.zTimeoutMs) > 0) {
+            Promise.resolve(
+              machine.setMotionSettings({ zTimeoutMs: clampZTimeout(ms.zTimeoutMs) })
+            ).catch(() => {});
+          }
           if (lp) setLoadingPosition((prev) => ({ ...prev, ...lp }));
           // Push the same values into machine.state via 'settings_hydrate'
           // (NOT 'snapshot' — the snapshot reducer now drops these fields
@@ -7520,7 +7533,7 @@ function AppInner() {
       }
     })();
     return () => { cancelled = true; };
-  }, [machine.state.connected, settingsHydrated, machine.loadSettings, machine.dispatch]);
+  }, [machine.state.connected, settingsHydrated, machine.loadSettings, machine.dispatch, machine.setMotionSettings]);
 
   const navigate = (next) => {
     setScreen(next);
@@ -8012,10 +8025,25 @@ function RunAbortReasonOverlay() {
 // The overlay closes by dispatching a synthetic `fault_dismiss` event and,
 // for resume actions, calling machine.runProgram with a resumeIndex.
 
+// Faults the firmware's fault_clear() releases on request (no physical
+// condition to wait for). The Clear Fault button is live immediately for
+// these — previously it waited for a FAULT_CLEARED event that these codes
+// never emit, so after a Z timeout the only way out was Override & Dismiss.
+const CLEARABLE_ON_REQUEST = new Set([
+  "FAULT_Z_TIMEOUT_DOWN",
+  "FAULT_Z_TIMEOUT_UP",
+  "USER_ABORT",
+  "FAULT_LINK_LOST",
+  "FAULT_HOMING_TIMEOUT",
+]);
+
 function FaultLockoutOverlay({ activeRun, setActiveRun, navigate }) {
   const machine = useMachine();
-  const { fault } = machine.state;
+  const { fault, run } = machine.state;
   const [stage, setStage] = useState("lockout"); // lockout | home | resume
+  // Which overlay action is in flight ('clear' | 'abort'), so buttons can
+  // show progress and ignore double-taps.
+  const [busyAction, setBusyAction] = useState(null);
   // Read the homing-in-progress flag from the reducer (single source of
   // truth — see #67). Local useState here would race with the WS event
   // stream the same way the boot/setup screens used to.
@@ -8047,12 +8075,67 @@ function FaultLockoutOverlay({ activeRun, setActiveRun, navigate }) {
     eStop: false,
   };
   const isEstop = !!meta.eStop;
-  const cellIndex = typeof fault.cellIndex === "number" ? fault.cellIndex : 0;
+  // Z timeout copy quotes the live firmware timeout.
+  const zTimeoutMs = Number(machine.state.zTimeoutMs) || Number(machine.state.motionSettings?.zTimeoutMs) || 5000;
+  const zTimeoutLabel = `${(zTimeoutMs / 1000).toFixed(zTimeoutMs % 1000 ? 1 : 0)} s`;
+  const bodyText = String(meta.body || "").replace("{zTimeout}", zTimeoutLabel);
+  // 0-based index of the cell that was in progress. Prefer the orchestrator's
+  // stamp (run.cellIndex on the 'aborted' event, which arrives right after the
+  // fault) — the firmware's cellIndex tag is the last cell it was told was
+  // DONE, which is one behind once the first cell has completed.
+  const cellIndex =
+    run?.phase === "aborted" && typeof run.cellIndex === "number"
+      ? run.cellIndex
+      : typeof fault.cellIndex === "number" ? fault.cellIndex : 0;
+  const canClear = fault.cleared || CLEARABLE_ON_REQUEST.has(fault.code);
 
   const handleClear = async () => {
-    await machine.clearFault();
-    if (fault.requiresHome) setStage("home");
-    else setStage("resume");
+    if (busyAction) return;
+    setBusyAction("clear");
+    let res = null;
+    try { res = await machine.clearFault(); } catch { /* offline */ }
+    setBusyAction(null);
+    // Firmware refused (condition still present) — stay on the lockout.
+    if (res && res.ok === false && /FAULT_STILL_ACTIVE/i.test(res.reply || "")) return;
+    if (fault.requiresHome) { setStage("home"); return; }
+    // No program attached — nothing to resume, just close the overlay.
+    if (!activeRun) { machine.dispatch({ type: "fault_dismiss" }); return; }
+    setStage("resume");
+  };
+
+  // Abort Program — end the run outright and hand the machine back to the
+  // operator. Clears the firmware lockout (soft faults), closes the run on
+  // both the Pi orchestrator and the firmware, parks at the loading position
+  // when it's safe to move (soft fault + homed + Z confirmed up), and returns
+  // to the home screen. The abort point stays saved so the next launch of
+  // this program still offers "Resume from cell N".
+  const abortProgram = async () => {
+    if (busyAction) return;
+    setBusyAction("abort");
+    const hardFault = !!fault.requiresHome || isEstop;
+    try {
+      if (!hardFault) { try { await machine.clearFault(); } catch { /* non-fatal */ } }
+      try { await machine.abortRun(); } catch { /* non-fatal */ }
+      const lp = machine.state.loadingPosition;
+      const zUp = !!machine.state.sensors?.zUp || !!machine.state.benchMode;
+      if (
+        !hardFault &&
+        machine.state.homed &&
+        zUp &&
+        lp &&
+        Number.isFinite(Number(lp.x)) &&
+        Number.isFinite(Number(lp.y)) &&
+        (Number(lp.x) !== 0 || Number(lp.y) !== 0)
+      ) {
+        try { await machine.moveTo(Number(lp.x), Number(lp.y)); } catch { /* operator can re-park */ }
+      }
+    } finally {
+      setBusyAction(null);
+      machine.dispatch({ type: "fault_dismiss" });
+      machine.dispatch({ type: "run_reason_dismiss" });
+      setActiveRun(null);
+      navigate("home");
+    }
   };
 
   const handleHome = async () => {
@@ -8066,34 +8149,25 @@ function FaultLockoutOverlay({ activeRun, setActiveRun, navigate }) {
   const pickResume = (resumeIndex, mode = "resume") => {
     // Dismiss the overlay first so the RunScreen can take over cleanly.
     machine.dispatch({ type: "fault_dismiss" });
+    machine.dispatch({ type: "run_reason_dismiss" });
     if (!activeRun) {
       navigate("programs");
       return;
     }
-    const nextRun = { ...activeRun, resumeIndex, resumeMode: mode };
-    setActiveRun(nextRun);
-    try {
-      machine.runProgram({
-        programId: activeRun.programId,
-        programName: activeRun.programName,
-        mode: activeRun.mode,
-        resumeIndex,
-        // Forward bench-mode so the orchestrator's end-of-run Z UP skip
-        // works on fault-recovery resumes too (otherwise a bench-rig resume
-        // would hang on the final-cell Z UP just like a fresh run did).
-        benchMode: !!machine.state.benchMode,
-      });
-    } catch {
-      /* no-op: demo / offline */
-    }
+    // Rev4.16 — hand the resume to the RunScreen instead of calling
+    // runProgram() here. The old direct call sent RUN_START without the
+    // program's coordinates / start position / holds / loading position,
+    // which the orchestrator rejects ("ERROR no coordinates"), so resuming
+    // after a fault silently did nothing. Changing activeRun re-runs the
+    // RunScreen's dispatch effect, which builds the full payload and passes
+    // resumeIndex through.
+    setActiveRun({ ...activeRun, resumeIndex, resumeMode: mode });
     navigate("run");
   };
 
-  const discard = () => {
-    machine.dispatch({ type: "fault_dismiss" });
-    setActiveRun(null);
-    navigate("home");
-  };
+  // Every "give up" exit from the overlay goes through the full abort so the
+  // run is closed on the Pi and firmware, not just hidden in the UI.
+  const discard = abortProgram;
 
   // Accent colors: red for the hardware lockout, amber once the operator
   // reaches the resume picker (the condition is resolved).
@@ -8153,7 +8227,7 @@ function FaultLockoutOverlay({ activeRun, setActiveRun, navigate }) {
         {/* Body per stage */}
         {stage === "lockout" && (
           <>
-            <div className="text-sm text-slate-200 mb-4 leading-relaxed">{meta.body}</div>
+            <div className="text-sm text-slate-200 mb-4 leading-relaxed">{bodyText}</div>
             <div className="grid grid-cols-2 gap-3 text-[11px] text-slate-300 mb-5">
               <div className="rounded-lg border border-white/10 bg-white/5 p-2">
                 <div className="text-[9px] tracking-[0.24em] uppercase text-slate-400">Program</div>
@@ -8162,8 +8236,8 @@ function FaultLockoutOverlay({ activeRun, setActiveRun, navigate }) {
                 </div>
               </div>
               <div className="rounded-lg border border-white/10 bg-white/5 p-2">
-                <div className="text-[9px] tracking-[0.24em] uppercase text-slate-400">Cell Index</div>
-                <div className="font-semibold">{cellIndex}</div>
+                <div className="text-[9px] tracking-[0.24em] uppercase text-slate-400">Stopped At Cell</div>
+                <div className="font-semibold">{activeRun ? cellIndex + 1 : "—"}</div>
               </div>
             </div>
 
@@ -8171,11 +8245,25 @@ function FaultLockoutOverlay({ activeRun, setActiveRun, navigate }) {
               <div className="text-[10px] tracking-[0.22em] uppercase text-slate-400">
                 {fault.cleared
                   ? "Condition cleared — you may proceed"
-                  : isEstop
+                  : canClear
+                    ? "Position held — ready to clear"
+                    : isEstop
                     ? "Waiting for E-stop release…"
                     : "Waiting for condition to resolve…"}
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap justify-end">
+                {/* Rev4.16 — end the program outright from the fault screen. */}
+                {activeRun && (
+                  <button
+                    onClick={abortProgram}
+                    disabled={!!busyAction}
+                    className="h-11 px-4 text-[11px] font-bold tracking-[0.15em] uppercase rounded-lg border border-red-500/50 bg-red-600/20 hover:bg-red-600/35 text-red-100 disabled:opacity-50 inline-flex items-center gap-2"
+                    title="End this run: clear the fault, stop the program and return home."
+                  >
+                    {busyAction === "abort" && <RingSpinner size={12} stroke={3} speed={1.0} />}
+                    {busyAction === "abort" ? "Aborting…" : "Abort Program"}
+                  </button>
+                )}
                 {/* Manual override — dismisses the lockout locally even if the
                     underlying condition hasn't resolved yet. Useful when the
                     operator knows the reported condition is a false alarm
@@ -8183,6 +8271,7 @@ function FaultLockoutOverlay({ activeRun, setActiveRun, navigate }) {
                     sensor, etc). We still try to send CLEAR_FAULT so the
                     firmware can clear its flag if it's willing to, but we
                     always dispatch the local dismiss so the overlay closes. */}
+                {!canClear && (
                 <button
                   onClick={() => {
                     machine.clearFault().catch(() => {});
@@ -8193,19 +8282,21 @@ function FaultLockoutOverlay({ activeRun, setActiveRun, navigate }) {
                 >
                   Override &amp; Dismiss
                 </button>
+                )}
                 <button
                   onClick={handleClear}
-                  disabled={!fault.cleared}
-                  className="hud-accent-btn h-11 px-5 text-xs font-bold tracking-[0.18em] uppercase border disabled:opacity-40"
+                  disabled={!canClear || !!busyAction}
+                  className="hud-accent-btn h-11 px-5 text-xs font-bold tracking-[0.18em] uppercase border disabled:opacity-40 inline-flex items-center gap-2"
                   style={{
-                    background: fault.cleared
+                    background: canClear
                       ? `linear-gradient(135deg, rgba(${accentRgb},0.85), rgba(${accentRgb},0.55))`
                       : "rgba(255,255,255,0.04)",
                     borderColor: `rgba(${accentRgb},0.5)`,
-                    boxShadow: fault.cleared ? `0 0 18px rgba(${accentRgb},0.35)` : "none",
+                    boxShadow: canClear ? `0 0 18px rgba(${accentRgb},0.35)` : "none",
                     color: "#fff",
                   }}
                 >
+                  {busyAction === "clear" && <RingSpinner size={12} stroke={3} speed={1.0} />}
                   Clear Fault
                 </button>
               </div>
@@ -8254,14 +8345,14 @@ function FaultLockoutOverlay({ activeRun, setActiveRun, navigate }) {
                 className="text-left p-3 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 transition"
               >
                 <div className="text-[10px] tracking-[0.24em] uppercase text-slate-400">Safer — weld may not have fired</div>
-                <div className="text-sm font-semibold">Re-run cell {cellIndex}</div>
+                <div className="text-sm font-semibold">Re-run cell {cellIndex + 1}</div>
               </button>
               <button
                 onClick={() => pickResume(cellIndex + 1, "continue")}
                 className="text-left p-3 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 transition"
               >
                 <div className="text-[10px] tracking-[0.24em] uppercase text-slate-400">Skip — cell already welded</div>
-                <div className="text-sm font-semibold">Continue from cell {cellIndex + 1}</div>
+                <div className="text-sm font-semibold">Continue from cell {cellIndex + 2}</div>
               </button>
               <button
                 onClick={() => pickResume(0, "restart")}
@@ -8274,9 +8365,10 @@ function FaultLockoutOverlay({ activeRun, setActiveRun, navigate }) {
             <div className="flex items-center justify-end pt-1">
               <button
                 onClick={discard}
-                className="h-9 px-3 text-[11px] font-semibold tracking-[0.15em] uppercase rounded-lg border border-white/10 bg-white/5 hover:bg-white/10"
+                disabled={!!busyAction}
+                className="h-9 px-3 text-[11px] font-semibold tracking-[0.15em] uppercase rounded-lg border border-red-500/40 bg-red-600/15 hover:bg-red-600/30 text-red-100 disabled:opacity-50"
               >
-                Discard & return home
+                {busyAction === "abort" ? "Aborting…" : "Abort Program & return home"}
               </button>
             </div>
           </>

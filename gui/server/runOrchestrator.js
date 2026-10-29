@@ -444,6 +444,13 @@ export function createRunOrchestrator({ send, emit }) {
     finishEmitted = true;
     if (phase === 'done') {
       send('RUN_COMPLETE').catch(() => {});
+    } else if (phase === 'aborted' && reason && reason !== 'user abort') {
+      // Rev4.16 — an internal abort (fault, BUSY, timeout, loop throw) used
+      // to leave the firmware's run context open (_run.active stayed true),
+      // so the Teensy still believed a program was running. Close it. The
+      // firmware's RUN_ABORT no longer forces IDLE while in FAULT_LOCKOUT,
+      // so this can't mask the fault; CLEAR_FAULT still releases lockout.
+      send('RUN_ABORT').catch(() => {});
     }
     // Stamp the abort event with the last cell we announced plus the program
     // identity so the UI can offer "resume from cell N" on the next run.
@@ -563,7 +570,14 @@ export function createRunOrchestrator({ send, emit }) {
     }
 
     if (verb === 'RUN_ABORT') {
-      if (!active) return { ok: false, reply: 'ERROR no run' };
+      if (!active) {
+        // Rev4.16 — idempotent. The fault overlay's "Abort Program" (and
+        // RunScreen teardown) can land after the loop already bailed on a
+        // fault. Still forward RUN_ABORT so the firmware's run context is
+        // definitely closed, and report success so the UI flow carries on.
+        send('RUN_ABORT').catch(() => {});
+        return { ok: true, reply: 'OK' };
+      }
       // Forward the abort to firmware. RUN_ABORT already does stepper_stop_all()
       // on the firmware side and drops the machine cleanly to STATE_IDLE — it
       // does NOT raise a fault. Previously we also sent STOP here as a

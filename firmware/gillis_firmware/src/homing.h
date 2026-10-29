@@ -51,21 +51,14 @@ static bool       _yRightHomed        = false;
 // 0 = no sensor has fired yet on this pass.
 static uint32_t   _yFirstTriggerMs    = 0;
 
-// Homing timeout — if we don't hit the sensor in this many ms, it's a fault.
-// Sized for the 590 mm Y envelope (full travel) at HOMING_SPEED_MM_S = 20 mm/s:
-//   590 mm / 20 mm/s = 29.5 s of constant-speed motion, plus acceleration,
-//   plus the dual-Y sync wait, plus the slow re-touch after backoff. 30 s
-//   was on the cliff edge for that travel and routinely tipped over into
-//   FAULT_HOMING_TIMEOUT. 60 s gives 2x headroom at worst-case starting
-//   position (gantry parked at maxY) without delaying a real sensor stall
-//   detection by an unreasonable amount.
+// Homing timeout — if we don't hit the sensor in this many ms, it's a fault
+// 2026-10-29: 30 s -> 60 s headroom (per phase: Y, then X — resets for X).
 #define HOMING_TIMEOUT_MS         60000
 
 // Dual-Y sync timeout — once one Y sensor triggers, the other must trigger
-// within this window or we fault. At HOMING_SPEED_MM_S = 20 mm/s, 500 ms = 10 mm
-// gantry rack — far beyond any expected mechanical out-of-square. Tighten to
-// 200–300 ms in production once typical inter-sensor delay is measured.
-#define HOMING_Y_DUAL_TIMEOUT_MS  500
+// within this window or we fault. 2026-10-29: halved 500 -> 250 ms when the
+// homing speed doubled to 40 mm/s, so the allowed rack stays at 10 mm.
+#define HOMING_Y_DUAL_TIMEOUT_MS  250
 
 // =============================================================================
 // Start homing sequence

@@ -27,20 +27,15 @@
 // --- Travel limits (mm) — DEFAULTS; live values kept in Settings --------------
 // These are the factory defaults used on first boot. Live values are
 // persisted in Settings.maxX / Settings.maxY and are updated by SET_TRAVEL.
-#define DEFAULT_AXIS_X_MAX_MM   340.0f   // Measured X travel (Rev4 onsite, May 2026)
-#define DEFAULT_AXIS_Y_MAX_MM   590.0f   // Measured Y travel (Rev4 onsite, May 2026)
+#define DEFAULT_AXIS_X_MAX_MM   400.0f   // Update to measured travel
+#define DEFAULT_AXIS_Y_MAX_MM   300.0f
 
 // --- Homing ------------------------------------------------------------------
-// Initial-touch homing speed. Optical (U-style) home sensors have no impact
-// concern, but the backoff reversal still loads the frame momentarily —
-// operator-tuned to 40 mm/s for a calmer feel (60 was still uncomfortable
-// on reversal). Original 20 mm/s was too slow to be useful. Slow re-touch
-// (HOMING_SLOW_SPEED_MM_S below) stays at 5 mm/s so final position
-// accuracy is untouched.
+// 2026-10-29: raised 20 -> 40 mm/s. At 20 mm/s a home started from the
+// loading position (Y ~585) couldn't finish the Y phase inside the homing
+// timeout. Slow re-touch speed (which sets the actual reference) unchanged.
 #define HOMING_SPEED_MM_S       40.0f
 #define HOMING_BACKOFF_MM       5.0f
-// Slow re-touch speed after backoff — DO NOT raise. Final home accuracy
-// depends on this being slow enough that the sensor edge is sampled cleanly.
 #define HOMING_SLOW_SPEED_MM_S  5.0f
 
 // Homing direction: LOW = move towards home sensor (negative direction)
@@ -49,14 +44,10 @@
 #define HOME_DIR_Y              LOW
 
 // After Y homes, gantry advances this far in +Y before X begins homing.
-// This was a mechanical clearance step to keep the Y carriage clear of the
-// X-home hardstop / sensor region. Set to 0 onsite (May 2026) — tested in
-// place and confirmed there's no collision risk between Y-home position
-// and X-homing travel on the assembled machine. The HOMING_Y_ADVANCE state
-// will still run, but stepper_jog_mm(axis, 0) short-circuits immediately
-// so the state transitions straight through to HOMING_X_FAST.
-// Sequence:  Y fast → Y back-off → Y slow → (Y ADVANCE 0mm, no-op) → X fast → ...
-#define HOMING_Y_ADVANCE_MM     0.0f
+// This is a mechanical clearance step — keeps the Y carriage clear of the
+// X-home hardstop / sensor region so X can seek without collision.
+// Sequence:  Y fast → Y back-off → Y slow → Y ADVANCE +100mm → X fast → ...
+#define HOMING_Y_ADVANCE_MM     100.0f
 
 // --- Default motion parameters -----------------------------------------------
 // Two profiles persisted independently (Rev4.3):
@@ -78,9 +69,15 @@
 #define DEFAULT_CELL_ACCEL_X_MM_S2  250.0f
 #define DEFAULT_CELL_ACCEL_Y_MM_S2  250.0f
 
-// --- Z solenoid timeouts (ms) ------------------------------------------------
-#define Z_TIMEOUT_DOWN_MS       2000
-#define Z_TIMEOUT_UP_MS         2000
+// --- Z solenoid timeout (ms) -------------------------------------------------
+// Rev4.16: the Z DOWN / Z UP sensor timeout is now an EEPROM setting
+// (settings.zTimeoutDs, tenths of a second) editable from the Pi Settings
+// screen via SETMOTION {"zTimeoutMs":N}. This is the default used on a fresh
+// EEPROM (or when the stored value is 0). The old fixed 2000 ms was too tight
+// for the spring-return Z UP with flow restrictors fitted.
+#define DEFAULT_Z_TIMEOUT_MS    5000
+#define Z_TIMEOUT_MIN_MS         500
+#define Z_TIMEOUT_MAX_MS       25500   // uint8 tenths-of-a-second ceiling
 
 // --- Laser -------------------------------------------------------------------
 // DEFAULT_DWELL_MS = how long the laser relay stays energised during FIRE

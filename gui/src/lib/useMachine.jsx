@@ -43,7 +43,12 @@ const INITIAL_STATE = {
     // these from the RUN_START payload and sleeps accordingly.
     preWeldHoldMs: 0,
     postWeldHoldMs: 0,
+    // Rev4.16 — Z DOWN / Z UP sensor timeout (ms). Firmware EEPROM setting,
+    // sent via SETMOTION {zTimeoutMs}. Firmware reports the live value in
+    // SNAPSHOT (ZTIMEOUT) which lands on the top-level `zTimeoutMs`.
+    zTimeoutMs: 5000,
   },
+  zTimeoutMs: 5000,
   gantryOffsetMm: 0,
   run: { active: false, paused: false, programName: null, index: 0, total: 0, phase: 'idle', reason: null },
   // Fault lockout — set when the firmware reports a FAULT code. The UI uses
@@ -346,7 +351,11 @@ function reduce(prev, evt) {
     case 'fault_dismiss':
       // Local-only event (not from firmware) — fired by the UI once the
       // operator has confirmed they want to continue (or scrap the run).
-      return { ...prev, fault: { ...INITIAL_STATE.fault } };
+      // Also drop run.reason: when a run died because of this fault, the
+      // orchestrator's reason ("z-up cell 3 failed: FAULT …") would otherwise
+      // pop the amber Run Stopped modal straight after the operator already
+      // dealt with the fault overlay.
+      return { ...prev, fault: { ...INITIAL_STATE.fault }, run: { ...prev.run, reason: null } };
     case 'run_reason_dismiss':
       // Local-only event fired when the operator dismisses the run-aborted
       // overlay. Clears the reason but leaves run.phase='aborted' so the
@@ -504,7 +513,10 @@ function reduce(prev, evt) {
               programId: evt.programId || prev.run.programId || null,
               cellIndex: typeof evt.cellIndex === 'number' ? evt.cellIndex : (prev.run.index ? prev.run.index - 1 : 0),
               total: typeof evt.total === 'number' ? evt.total : prev.run.total,
-              reason: evt.reason && evt.reason !== 'user abort' ? String(evt.reason) : null,
+              // A firmware fault already has its own overlay (which walks
+              // the operator through clear / resume / abort) — don't stack
+              // the amber reason modal on top of it.
+              reason: !prev.fault.active && evt.reason && evt.reason !== 'user abort' ? String(evt.reason) : null,
             },
             busy: false,
           };

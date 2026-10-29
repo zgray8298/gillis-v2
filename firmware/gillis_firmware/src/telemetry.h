@@ -148,6 +148,7 @@ inline void snapshot_emit() {
   Serial.print(" DWELL"); Serial.print(settings.dwellMs);
   Serial.print(" PREWELD");  Serial.print(settings.preWeldHoldMs);
   Serial.print(" POSTWELD"); Serial.print(settings.postWeldHoldMs);
+  Serial.print(" ZTIMEOUT"); Serial.print(z_timeout_ms());
   Serial.print(" HOMEBOOT"); Serial.print(settings.homeOnBoot ? 1 : 0);
   Serial.print(" BENCHMODE"); Serial.print(settings.benchMode ? 1 : 0);
   run_print_status_fragment();

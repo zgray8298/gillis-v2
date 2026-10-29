@@ -30,15 +30,8 @@ inline void state_init() {
 
 // =============================================================================
 // Move-request guards shared across commands
-//
-// `requireZSafe` controls the Z-up gate. Defaults to true so every existing
-// caller (MOVE, JOG, TRAM_PREVIEW, etc.) keeps the safety interlock. The
-// calibration-only MOVE_CAL command passes false so the operator can jog the
-// table while teaching start positions with the weld head down (e.g. lining
-// up the head's contact point on a fixture). All other safety gates
-// (FAULT_LOCKOUT, ESTOP, driver enable, machine state) still apply.
 // =============================================================================
-inline bool state_motion_allowed(const char* cmdName, bool requireZSafe = true) {
+inline bool state_motion_allowed(const char* cmdName) {
   (void)cmdName;
   if (machineState.state == STATE_FAULT_LOCKOUT ||
       machineState.state == STATE_ESTOP) {
@@ -54,7 +47,7 @@ inline bool state_motion_allowed(const char* cmdName, bool requireZSafe = true) 
     Serial.println("BUSY");
     return false;
   }
-  if (requireZSafe && !z_safe()) {
+  if (!z_safe()) {
     Serial.println("BUSY");  // Z not confirmed up
     return false;
   }
@@ -102,37 +95,6 @@ inline void state_request_move(float x, float y) {
 }
 
 // =============================================================================
-// state_request_move_cal — calibration MOVE that bypasses the Z-up gate
-//
-// Identical to state_request_move EXCEPT z_safe() is skipped. Used by the
-// Calibrate Start Position / Loading Position screens so the operator can
-// nudge the table with Z either UP or DOWN — useful for visually aligning
-// the weld head against a fixture. All other safety gates still apply
-// (FAULT_LOCKOUT, ESTOP, driver enable, soft limits).
-// =============================================================================
-inline void state_request_move_cal(float x, float y) {
-  if (!state_motion_allowed("MOVE_CAL", /*requireZSafe=*/false)) return;
-
-  clamp_x_to_limits(x);
-  clamp_y_to_limits(y);
-
-  bool wasIdle = (machineState.state == STATE_IDLE);
-  if (wasIdle) machineState.state = STATE_MOVING;
-
-  stepper_move_to_mm(axisX,      x);
-  stepper_move_to_mm(axisYLeft,  y);
-  stepper_move_to_mm(axisYRight, y + settings.tramOffset);
-  Serial.println("OK");
-
-  // Mirror state_request_move's zero-motion shortcut so the orchestrator's
-  // awaitingDone promise resolves immediately when the target equals current.
-  if (!any_axis_moving()) {
-    if (wasIdle) machineState.state = STATE_IDLE;
-    Serial.println("DONE");
-  }
-}
-
-// =============================================================================
 // state_request_jog — JOG command entry point (relative mm on one axis)
 // =============================================================================
 inline void state_request_jog_x(float deltaMm) {
@@ -174,44 +136,6 @@ inline void state_request_jog_y(float deltaMm) {
   }
   stepper_jog_mm(axisYLeft,  clampedDelta);
   stepper_jog_mm(axisYRight, clampedDelta);
-  Serial.println("OK");
-  if (!any_axis_moving()) {
-    if (wasIdle) machineState.state = STATE_IDLE;
-    Serial.println("DONE");
-  }
-}
-
-// =============================================================================
-// state_request_tram_preview — TRAM_PREVIEW command entry point
-// =============================================================================
-// Live-preview the gantry-square offset without writing to EEPROM. Updates
-// settings.tramOffset in RAM and slews Y_RIGHT alone to put it at
-// (Y_LEFT pos + newOffset). Y_LEFT does NOT move — only Y_RIGHT racks by the
-// delta, so the gantry visibly squares in real time as the operator taps
-// ↑/↓ on the X-Axis Tramming screen. The Save button on that screen still
-// calls SET_TRAM to commit the value to EEPROM.
-//
-// Tramming offsets are typically sub-mm so racking the gantry by the delta
-// per tap is mechanically fine. The Pi-side adjustOffset step is 0.01 mm.
-// =============================================================================
-inline void state_request_tram_preview(float newOffsetMm) {
-  if (!state_motion_allowed("TRAM_PREVIEW")) return;
-
-  float delta = newOffsetMm - settings.tramOffset;
-  if (delta == 0.0f) { Serial.println("OK"); Serial.println("DONE"); return; }
-
-  // Update RAM offset so subsequent MOVE / JOG commands use the new value.
-  // EEPROM is NOT touched — only SET_TRAM persists. If the operator leaves
-  // the tramming screen without saving, the Pi-side cleanup effect calls
-  // TRAM_PREVIEW with the saved value to revert both this RAM offset and
-  // Y_RIGHT's physical position.
-  settings.tramOffset = newOffsetMm;
-
-  bool wasIdle = (machineState.state == STATE_IDLE);
-  if (wasIdle) {
-    machineState.state = STATE_MOVING;
-  }
-  stepper_jog_mm(axisYRight, delta);
   Serial.println("OK");
   if (!any_axis_moving()) {
     if (wasIdle) machineState.state = STATE_IDLE;
