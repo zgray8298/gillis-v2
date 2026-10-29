@@ -392,6 +392,27 @@ inline void serial_dispatch(const char* cmd) {
     return;
   }
 
+  // ---- MOVE_CAL X<n> Y<n> ----
+  // Calibration-only absolute MOVE that bypasses the z_safe() gate so the
+  // Calibrate Start Position / Loading Position screens can jog the table
+  // with Z either UP or DOWN. Always uses the fast motion profile — the
+  // operator is nudging by hand, no cell-pattern semantics apply. Must be
+  // matched BEFORE the "MOVE " prefix below, otherwise ci_prefix("MOVE ")
+  // would swallow "MOVE_CAL " (the underscore isn't a space, but the
+  // dispatcher walks command prefixes in order so getting this wrong would
+  // route MOVE_CAL through the gated path).
+  if (ci_prefix(cmd, "MOVE_CAL ")) {
+    apply_fast_profile();
+    float x = stepper_position_mm(axisX);
+    float y = stepper_position_mm(axisYLeft);
+    parse_axis_value_pairs(cmd + 9, [&](char ax, float v){
+      if (ax == 'X') x = v;
+      else if (ax == 'Y') y = v;
+    });
+    state_request_move_cal(x, y);
+    return;
+  }
+
   // ---- MOVE X<n> Y<n> [P=C|P=F] ----
   // P=C routes through the cell-to-cell motion profile (persisted as
   // cellSpeed*/cellAccel*). P=F or omitted uses the fast profile
@@ -615,6 +636,18 @@ inline void serial_dispatch(const char* cmd) {
     settings.dwellMs = (uint32_t)atol(cmd + 10);
     settings_save();
     Serial.println("OK");
+    return;
+  }
+
+  // ---- TRAM_PREVIEW <mm> ----
+  // Live-preview the tramming offset: updates settings.tramOffset in RAM only
+  // (no EEPROM write) and slews Y_RIGHT alone so the gantry visibly squares as
+  // the operator taps ↑/↓ on the X-Axis Tramming screen. The Save button on
+  // that screen calls SET_TRAM (below) to persist the final value. See
+  // state_request_tram_preview() in state_machine.h.
+  if (ci_prefix(cmd, "TRAM_PREVIEW ")) {
+    float v = atof(cmd + 13);
+    state_request_tram_preview(v);
     return;
   }
 

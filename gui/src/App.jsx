@@ -2075,7 +2075,14 @@ function HomeScreen({ setScreen, onHome, onBack }) {
 
 /* ------------------------------- PRODUCTION ------------------------------- */
 
-function ProductionScreen({ setScreen, programs, onHome, onBack, setActiveRun }) {
+function ProductionScreen({ setScreen, programs: programsUnsorted, onHome, onBack, setActiveRun }) {
+  // Most recently run first (lastRunAt is stamped by AppInner when a run
+  // starts). Programs that have never been run keep their existing relative
+  // order and sit below the ones that have (Array.prototype.sort is stable).
+  const programs = useMemo(
+    () => [...programsUnsorted].sort((a, b) => (Number(b.lastRunAt) || 0) - (Number(a.lastRunAt) || 0)),
+    [programsUnsorted]
+  );
   const [selectedProgramName, setSelectedProgramName] = useState(programs[0]?.name || "");
   const [mode, setMode] = useState("Positive");
 
@@ -7462,6 +7469,22 @@ function AppInner() {
     })();
     return () => { cancelled = true; };
   }, [machine.state.connected, programsHydrated, machine.loadPrograms]);
+
+  // Stamp `lastRunAt` on a program whenever a run of it actually starts (the
+  // orchestrator's run:start event — after the move to the start position).
+  // Production sorts its list by this, most recent first. Test runs count.
+  // Persisted with the rest of the program via the debounced save below.
+  useEffect(() => {
+    const off = machine.subscribe((evt) => {
+      if (evt?.type !== 'run' || evt.phase !== 'start' || !evt.programName) return;
+      const now = Date.now();
+      setPrograms((prev) => {
+        if (!prev.some((p) => p.name === evt.programName)) return prev;
+        return prev.map((p) => (p.name === evt.programName ? { ...p, lastRunAt: now } : p));
+      });
+    });
+    return () => { if (typeof off === 'function') off(); };
+  }, [machine.subscribe]);
 
   // Debounced save — wait 800ms after the last edit before hitting the disk.
   useEffect(() => {
